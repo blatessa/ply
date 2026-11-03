@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,11 +36,17 @@ type Task struct {
 	BaseSnapshot Hash  `json:"base_snapshot"`
 	Reverts      int64 `json:"reverts,omitempty"`
 	// ShareSeq counts shares; a share must name the ShareSeq it builds on.
-	ShareSeq     int64     `json:"share_seq"`
-	SharedBy     string    `json:"shared_by,omitempty"`
-	NeedsRefresh bool      `json:"needs_refresh,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ShareSeq     int64  `json:"share_seq"`
+	SharedBy     string `json:"shared_by,omitempty"`
+	NeedsRefresh bool   `json:"needs_refresh,omitempty"`
+	// Conflicts lists unresolved conflicts in the task's latest change; a
+	// task can't be approved until it's empty. JSON-encoded merge conflicts.
+	Conflicts []Conflict `json:"conflicts,omitempty"`
+	// SyncedSnapshot is, locally, the task's latest snapshot as of the last
+	// share or fetch. Unused on the server.
+	SyncedSnapshot Hash      `json:"-"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // Change is a labeled point in a task's work.
@@ -94,15 +101,33 @@ func notFound(what string, err error) error {
 
 const taskCols = `id, title, description, owner, assignee, status, coalesce(base_task, 0),
 	base_version, base_snapshot, coalesce(reverts, 0), share_seq, shared_by, needs_refresh,
-	created_at, updated_at`
+	created_at, updated_at, conflicts, synced_snapshot`
+
+// Conflict is an unresolved conflict in a task's files.
+type Conflict struct {
+	Path   string `json:"path"`
+	Kind   string `json:"kind"`             // "text" or "binary"
+	Ours   string `json:"ours,omitempty"`   // binary: path of one version
+	Theirs string `json:"theirs,omitempty"` // binary: path of the other
+}
 
 func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 	var t Task
 	var snap []byte
 	var created, updated int64
+	var conflicts string
+	var synced []byte
 	err := sc.Scan(&t.ID, &t.Title, &t.Description, &t.Owner, &t.Assignee, &t.Status, &t.BaseTask,
-		&t.BaseVersion, &snap, &t.Reverts, &t.ShareSeq, &t.SharedBy, &t.NeedsRefresh, &created, &updated)
+		&t.BaseVersion, &snap, &t.Reverts, &t.ShareSeq, &t.SharedBy, &t.NeedsRefresh, &created, &updated,
+		&conflicts, &synced)
+	if err != nil {
+		return t, err
+	}
 	t.BaseSnapshot = hashFrom(snap)
+	t.SyncedSnapshot = hashFrom(synced)
+	if err := json.Unmarshal([]byte(conflicts), &t.Conflicts); err != nil {
+		return t, fmt.Errorf("task %d conflicts: %w", t.ID, err)
+	}
 	t.CreatedAt, t.UpdatedAt = fromTS(created), fromTS(updated)
 	return t, err
 }
@@ -126,18 +151,28 @@ func (tx *Tx) PutTask(t *Task) error {
 	if t.Status == "" {
 		t.Status = StatusOpen
 	}
+	conflicts, _ := json.Marshal(t.Conflicts)
+	if t.Conflicts == nil {
+		conflicts = []byte("[]")
+	}
+	var synced any
+	if !t.SyncedSnapshot.IsZero() {
+		synced = t.SyncedSnapshot[:]
+	}
 	res, err := tx.exec(`INSERT INTO task (id, title, description, owner, assignee, status,
-		base_task, base_version, base_snapshot, reverts, share_seq, shared_by, needs_refresh, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		base_task, base_version, base_snapshot, reverts, share_seq, shared_by, needs_refresh, created_at, updated_at,
+		conflicts, synced_snapshot)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET title = excluded.title, description = excluded.description,
 		owner = excluded.owner, assignee = excluded.assignee, status = excluded.status,
 		base_task = excluded.base_task, base_version = excluded.base_version,
 		base_snapshot = excluded.base_snapshot, reverts = excluded.reverts,
 		share_seq = excluded.share_seq, shared_by = excluded.shared_by,
-		needs_refresh = excluded.needs_refresh, updated_at = excluded.updated_at`,
+		needs_refresh = excluded.needs_refresh, updated_at = excluded.updated_at,
+		conflicts = excluded.conflicts, synced_snapshot = excluded.synced_snapshot`,
 		nullID(t.ID), t.Title, t.Description, t.Owner, t.Assignee, t.Status, nullID(t.BaseTask),
 		t.BaseVersion, t.BaseSnapshot[:], nullID(t.Reverts), t.ShareSeq, t.SharedBy, t.NeedsRefresh,
-		ts(t.CreatedAt), ts(t.UpdatedAt))
+		ts(t.CreatedAt), ts(t.UpdatedAt), string(conflicts), synced)
 	if err != nil {
 		return err
 	}

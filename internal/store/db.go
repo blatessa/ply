@@ -164,3 +164,9 @@ func (db *DB) migrate() error {
 	}
 	return nil
 }
+
+// Exec, Query and QueryRow give packages that own local-only tables (such as
+// the workspace scan cache) direct SQL access within the transaction.
+func (t *Tx) Exec(q string, args ...any) (sql.Result, error) { return t.tx.Exec(q, args...) }
+func (t *Tx) Query(q string, args ...any) (*sql.Rows, error) { return t.tx.Query(q, args...) }
+func (t *Tx) QueryRow(q string, args ...any) *sql.Row        { return t.tx.QueryRow(q, args...) }

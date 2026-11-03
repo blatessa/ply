@@ -125,4 +125,10 @@ CREATE TABLE scan (
 	PRIMARY KEY (workspace, path)
 ) WITHOUT ROWID;
 `,
+	// 2: conflicts travel with a task; locally, the last state synced with
+	// the server (to merge in changes someone else shared).
+	`
+ALTER TABLE task ADD COLUMN conflicts TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE task ADD COLUMN synced_snapshot BLOB;
+`,
 }
