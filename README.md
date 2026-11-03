@@ -23,7 +23,26 @@ ply log
 ```
 
 Teammates join with `ply join http://localhost:7070/my-app`, which makes a folder for the project.
-`ply switch <task>` shows another task in your folder; your unlabeled work stays with the task you left.
+`ply go <task>` shows another task in your folder; your unlabeled work stays with the task you left.
+
+### Showing the task in your prompt or status bar
+
+Each project folder has a `.ply` file at its root saying what it shows, so a shell prompt or editor
+status bar can display it without running Ply:
+
+```json
+{ "project": "http://localhost:7070/my-app", "task": 12, "title": "Fix login", "folder": 1 }
+```
+
+`task` is 0 when the folder shows the project itself. For example, a [starship](https://starship.rs)
+module (needs `jq`):
+
+```toml
+[custom.ply]
+when = 'd=$PWD; while [ "$d" != / ] && [ ! -f "$d/.ply" ]; do d=$(dirname "$d"); done; [ -f "$d/.ply" ]'
+command = 'd=$PWD; while [ ! -f "$d/.ply" ]; do d=$(dirname "$d"); done; jq -r "if .task == 0 then \"project\" else \"#\\(.task) \\(.title)\" end" "$d/.ply"'
+format = "[ply $output]($style) "
+```
 
 Run `ply help` for every command, and `ply skill` for the short guide agents load.
 

@@ -181,13 +181,13 @@ func (e *Env) Workspace() (*WS, error) {
 			}
 		}
 		if errors.Is(err, sql.ErrNoRows) {
-			return plyerr.New(plyerr.NotFound, "ply switch <task> --separate", "this folder isn't one of this machine's project folders (it was removed or copied); make a new one with")
+			return plyerr.New(plyerr.NotFound, "ply go <task> --separate", "this folder isn't one of this machine's project folders (it was removed or copied); make a new one with")
 		}
 		if err != nil {
 			return err
 		}
-		if w.Task != ws.Task || w.Folder != ws.ID {
-			return ws.writeMarker()
+		if w.Task != ws.Task || w.Folder != ws.ID || w.Title != ws.title(tx) {
+			return ws.writeMarker(tx)
 		}
 		return nil
 	})
@@ -198,9 +198,24 @@ func (e *Env) Workspace() (*WS, error) {
 	return ws, nil
 }
 
-func (w *WS) writeMarker() error {
-	mk := &workspace.Workspace{Root: w.Root, Marker: workspace.Marker{Project: w.URL, Task: w.Task, Folder: w.ID}}
+// writeMarker writes the folder's .ply file: its project, folder ID, and
+// the task it shows with its title, so status bars and shell prompts can
+// show it without running ply.
+func (w *WS) writeMarker(tx *store.Tx) error {
+	mk := &workspace.Workspace{Root: w.Root, Marker: workspace.Marker{Project: w.URL, Task: w.Task, Title: w.title(tx), Folder: w.ID}}
 	return mk.WriteMarker()
+}
+
+// title is the title of the task the folder shows ("" for the project).
+func (w *WS) title(tx *store.Tx) string {
+	if w.Task == 0 {
+		return ""
+	}
+	t, err := tx.Task(w.Task)
+	if err != nil {
+		return ""
+	}
+	return t.Title
 }
 
 // Save is a recorded snapshot of a workspace.

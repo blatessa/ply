@@ -120,7 +120,7 @@ func (w *WS) fill(tx *store.Tx, files store.Hash, copyIgnoredFrom string) error 
 	if err := workspace.Materialize(tx, w.ID, w.Root, snap, donors); err != nil {
 		return err
 	}
-	if err := w.writeMarker(); err != nil {
+	if err := w.writeMarker(tx); err != nil {
 		return err
 	}
 	if copyIgnoredFrom != "" {
@@ -294,15 +294,15 @@ func (w *WS) rewrite(tx *store.Tx, cur *store.Snapshot, curH, files store.Hash, 
 	if err := w.noteSwitch(tx, prevTask, curH, files); err != nil {
 		return 0, err
 	}
-	if err := w.writeMarker(); err != nil {
+	if err := w.writeMarker(tx); err != nil {
 		return 0, err
 	}
 	_, _, err = w.catchUp(tx)
 	return n, err
 }
 
-// SwitchResult says what a folder now shows.
-type SwitchResult struct {
+// GoResult says what a folder now shows.
+type GoResult struct {
 	Task    *store.Task `json:"task,omitempty"` // nil: the project
 	Project int64       `json:"project,omitempty"`
 	Path    string      `json:"path"`
@@ -316,8 +316,8 @@ type SwitchResult struct {
 	Warning  string `json:"warning,omitempty"`
 }
 
-// SwitchOptions configure a switch.
-type SwitchOptions struct {
+// GoOptions configure a switch.
+type GoOptions struct {
 	Separate bool
 	Here     bool   // use this folder even when running as an agent
 	Path     string // with Separate: where to make the folder
@@ -353,7 +353,7 @@ func agentSeparate(cur *WS, here bool) string {
 
 // Switch makes the current folder show another task (or "project"), or with
 // Separate makes an extra folder for it.
-func (e *Env) Switch(ctx context.Context, ref string, o SwitchOptions) (*SwitchResult, error) {
+func (e *Env) Go(ctx context.Context, ref string, o GoOptions) (*GoResult, error) {
 	var task int64
 	if ref != "project" {
 		id, err := project.ParseTask(ref)
@@ -439,15 +439,15 @@ func (e *Env) Switch(ctx context.Context, ref string, o SwitchOptions) (*SwitchR
 		}
 	}
 	p.prune(ctx)
-	r, err := w.switchResult(ctx, restored)
+	r, err := w.goResult(ctx, restored)
 	if r != nil {
 		r.Rewrote, r.Separate = rewrote, because
 	}
 	return r, err
 }
 
-func (w *WS) switchResult(ctx context.Context, restored bool) (*SwitchResult, error) {
-	r := &SwitchResult{Path: w.Root, Restored: restored}
+func (w *WS) goResult(ctx context.Context, restored bool) (*GoResult, error) {
+	r := &GoResult{Path: w.Root, Restored: restored}
 	if w.Task == 0 {
 		r.Project, r.BuiltOn = w.BaseVersion, fmt.Sprintf("project #%d", w.BaseVersion)
 		return r, nil
@@ -674,7 +674,7 @@ func noDonors(*store.Tx) (workspace.Donors, error) { return nil, nil }
 // switch to the task in another folder to pick it up again.
 func (w *WS) Remove(ctx context.Context, force bool) error {
 	if w.Main {
-		return plyerr.New(plyerr.Invalid, "ply switch <task>", "this is the project's main folder, which stays; only extra folders can be removed. Show another task in it with")
+		return plyerr.New(plyerr.Invalid, "ply go <task>", "this is the project's main folder, which stays; only extra folders can be removed. Show another task in it with")
 	}
 	_, cur, err := w.CatchUp(ctx)
 	if err != nil {

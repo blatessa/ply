@@ -14,6 +14,7 @@ const MarkerName = ".ply"
 type Marker struct {
 	Project string `json:"project"`          // project URL
 	Task    int64  `json:"task"`             // the task shown; 0 is the project itself
+	Title   string `json:"title,omitempty"`  // the task's title, for status bars and prompts
 	Folder  int64  `json:"folder,omitempty"` // this folder's ID on this machine
 }
 

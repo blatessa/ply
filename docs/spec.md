@@ -69,7 +69,7 @@ Every command does one thing, and only commands change files. Commands run insid
 | `ply new "Fix login bug"` | Create a task from the current project and show it in this folder. The task you leave keeps its unlabeled work. |
 | `ply new "..." --on [<task>]` | Build on the task this folder shows, or on any task. |
 | `ply new "..." --separate` | Make an extra folder for the task instead (copying ignored files like node\_modules over), for parallel work. |
-| `ply switch <task>` | Show another task in this folder: yours or anyone's. Unlabeled work stays with the task you left; switching back restores it. Ignored files aren't touched. |
+| `ply go <task>` | Show another task in this folder: yours or anyone's. Unlabeled work stays with the task you left; switching back restores it. Ignored files aren't touched. |
 | `ply ship "Fix typo"` | Wrap what you just changed into its own small task and apply it, if the project lets you approve your own tasks; otherwise share it, ready for review. |
 | `ply status` | What's unlabeled, any conflicts, what the task is built on, and whether it needs a refresh. |
 | `ply diff` | Show changes: unlabeled work, or a task's changes. |

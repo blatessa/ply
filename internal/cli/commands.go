@@ -132,7 +132,7 @@ func init() {
 		},
 	})
 	register(&command{
-		name: "switch", usage: "switch <task>|project [--separate | --here] [--path <folder>]", minPos: 1, maxPos: 1,
+		name: "go", usage: "go <task>|project [--separate | --here] [--path <folder>]", minPos: 1, maxPos: 1,
 		valued: []string{"path"}, bools: []string{"separate", "here"},
 		summary: "Show another task in this folder: yours or anyone's (or `project` for the project itself).\nThe task you leave keeps its unlabeled work, and coming back restores it. Ignored files stay put.\n--separate (or --path) makes an extra folder for the task instead, copying ignored files over.\nAgents get an extra folder by default when run in the project's main folder (see `ply help new`).",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
@@ -140,7 +140,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			r, err := e.Switch(ctx, a.Arg(0), local.SwitchOptions{Separate: a.Bool("separate"), Here: a.Bool("here"), Path: a.Str("path"), Project: a.Str("project")})
+			r, err := e.Go(ctx, a.Arg(0), local.GoOptions{Separate: a.Bool("separate"), Here: a.Bool("here"), Path: a.Str("path"), Project: a.Str("project")})
 			if err != nil {
 				return nil, err
 			}
@@ -645,7 +645,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			c.say("Created task #%d %q. Review it with `ply review %d`, or work on it with `ply switch %d`.", info.ID, info.Title, info.ID, info.ID)
+			c.say("Created task #%d %q. Review it with `ply review %d`, or work on it with `ply go %d`.", info.ID, info.Title, info.ID, info.ID)
 			if len(info.Conflicts) > 0 {
 				c.say("  It conflicts with later work in %d files; resolve them in its workspace.", len(info.Conflicts))
 			}
@@ -654,7 +654,7 @@ func init() {
 	})
 	register(&command{
 		name: "remove", usage: "remove [--force]", maxPos: 0, bools: []string{"force"},
-		summary: "Remove this extra folder (one made with --separate). The task's work stays on this machine;\n`ply switch <task>` in another folder picks it up again. The project's main folder can't be removed.",
+		summary: "Remove this extra folder (one made with --separate). The task's work stays on this machine;\n`ply go <task>` in another folder picks it up again. The project's main folder can't be removed.",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			w, err := c.ws()
 			if err != nil {

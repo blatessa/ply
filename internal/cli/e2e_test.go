@@ -294,7 +294,7 @@ func TestStaleShare(t *testing.T) {
 	a.ok("label", "alice 1")
 	a.ok("share")
 
-	b.ok("switch", "2")
+	b.ok("go", "2")
 	b.write("f.txt", strings.Replace(strings.Replace(lines, "one", "alice", 1), "eight", "bob", 1))
 	b.ok("label", "bob 1")
 	b.ok("share")
@@ -348,11 +348,11 @@ func TestStackedTasks(t *testing.T) {
 	a.ok("label", "reset")
 	a.ok("share")
 	// More work underneath marks the top task as needing a refresh.
-	a.ok("switch", "2")
+	a.ok("go", "2")
 	a.write("login.txt", "fixed better\n")
 	a.ok("label", "better")
 	a.ok("share")
-	a.ok("switch", "3")
+	a.ok("go", "3")
 	var st struct {
 		Refresh string `json:"refresh"`
 	}
@@ -574,7 +574,7 @@ func TestSeparateFolderCopiesIgnored(t *testing.T) {
 		t.Fatalf("other folders: %+v", st.Folders)
 	}
 	// A task can only show in one folder at a time.
-	a.fails("showing in another folder", "switch", "2")
+	a.fails("showing in another folder", "go", "2")
 	// Removing the extra folder keeps the task's work: show it in the main
 	// folder.
 	a.write("two.txt", "two\n")
@@ -585,7 +585,7 @@ func TestSeparateFolderCopiesIgnored(t *testing.T) {
 	}
 	a.cd(main)
 	a.fails("main folder", "remove")
-	a.ok("switch", "3")
+	a.ok("go", "3")
 	if a.read("two.txt") != "two\n" || a.exists("one.txt") {
 		t.Fatalf("after switching: two=%q one=%v", a.read("two.txt"), a.exists("one.txt"))
 	}
@@ -627,18 +627,31 @@ func TestSwitchKeepsWork(t *testing.T) {
 	a.fails("no change to edit", "label", "--edit")
 	a.ok("redo")
 	a.ok("share")
-	a.ok("switch", "3")
+	a.ok("go", "3")
 	if a.read("f.txt") != "second\n" {
 		t.Fatalf("second task's work: %q", a.read("f.txt"))
 	}
 
 	// Anyone's task: Bob looks at Alice's shared task, then goes back to
 	// the project.
-	b.ok("switch", "2")
+	b.ok("go", "2")
 	if b.read("f.txt") != "first labeled\n" {
 		t.Fatalf("bob sees %q", b.read("f.txt"))
 	}
-	b.ok("switch", "project")
+	var mk struct {
+		Task  int64  `json:"task"`
+		Title string `json:"title"`
+	}
+	json.Unmarshal([]byte(b.read(".ply")), &mk)
+	if mk.Task != 2 || mk.Title != "First" {
+		t.Fatalf(".ply marker: %+v", mk)
+	}
+	b.ok("go", "project")
+	mk.Title = ""
+	json.Unmarshal([]byte(b.read(".ply")), &mk)
+	if mk.Task != 0 || mk.Title != "" {
+		t.Fatalf(".ply marker on the project: %+v", mk)
+	}
 	if b.read("f.txt") != lines {
 		t.Fatalf("project view: %q", b.read("f.txt"))
 	}
@@ -688,7 +701,7 @@ func TestProjectViewEditsComeAlong(t *testing.T) {
 	b.ok("label", "idea")
 	b.ok("share")
 	// Going back to the project: the edits moved into the task.
-	b.ok("switch", "project")
+	b.ok("go", "project")
 	if b.read("f.txt") != strings.Replace(lines, "eight", "alice", 1) {
 		t.Fatalf("project view after new: %q", b.read("f.txt"))
 	}

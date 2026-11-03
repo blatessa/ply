@@ -252,7 +252,7 @@ func (e *Env) Start(ctx context.Context, url string) (*StartResult, error) {
 		if w, err = proj.newFolder(tx, e.Dir, true, info.ID, 0, store.EmptySnapshot); err != nil {
 			return err
 		}
-		if err := w.writeMarker(); err != nil {
+		if err := w.writeMarker(tx); err != nil {
 			return err
 		}
 		snap, _, err := w.catchUp(tx)
