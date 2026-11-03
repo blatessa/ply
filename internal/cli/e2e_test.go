@@ -618,7 +618,7 @@ func TestSwitchKeepsWork(t *testing.T) {
 	var r struct {
 		Restored bool `json:"restored_work"`
 	}
-	a.json(&r, "switch", "2")
+	a.json(&r, "go", "2")
 	if !r.Restored || a.read("f.txt") != "first unlabeled\n" || a.read("new.txt") != "new\n" {
 		t.Fatalf("switch back: restored=%v f=%q", r.Restored, a.read("f.txt"))
 	}
