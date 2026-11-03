@@ -38,9 +38,13 @@ type command struct {
 	// valued lists flags that take a value; other flags are booleans.
 	valued []string
 	bools  []string
-	minPos int
-	maxPos int // -1: any
-	run    func(ctx context.Context, c *CLI, a *Args) (any, error)
+	// optional lists flags whose value may be left out: a bare --on means
+	// "." (the folder's task). The next argument is taken as the value only
+	// if it looks like one (see looksLikeValue).
+	optional []string
+	minPos   int
+	maxPos   int // -1: any
+	run      func(ctx context.Context, c *CLI, a *Args) (any, error)
 }
 
 // CLI runs commands, writing to Out and Err.
@@ -69,6 +73,10 @@ func parse(c *command, args []string) (*Args, error) {
 	for _, v := range c.valued {
 		valued[v] = true
 	}
+	optional := map[string]bool{}
+	for _, o := range c.optional {
+		optional[o] = true
+	}
 	bools := map[string]bool{"json": true, "help": true}
 	for _, b := range c.bools {
 		bools[b] = true
@@ -95,6 +103,15 @@ func parse(c *command, args []string) (*Args, error) {
 			name = "message"
 		}
 		switch {
+		case optional[name]:
+			if !hasVal {
+				val = "."
+				if i+1 < len(args) && looksLikeValue(args[i+1]) {
+					i++
+					val = args[i]
+				}
+			}
+			a.Flags[name] = val
 		case valued[name]:
 			if !hasVal {
 				if i+1 >= len(args) {
@@ -168,6 +185,24 @@ func (c *CLI) Run(ctx context.Context, argv []string) int {
 		enc.Encode(out)
 	}
 	return 0
+}
+
+// looksLikeValue reports whether s is a task reference or "project", so a
+// title after a bare --on isn't mistaken for its value.
+func looksLikeValue(s string) bool {
+	if s == "project" || s == "." {
+		return true
+	}
+	s = strings.TrimPrefix(s, "#")
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func contains(ss []string, s string) bool {

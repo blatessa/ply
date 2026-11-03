@@ -4,17 +4,19 @@ package cli
 const Skill = `# Using Ply
 
 Ply is source control built on tasks. The project changes only when a task is
-approved. You do all work inside a task's workspace: a normal folder.
+approved. A project folder is a normal folder that shows one task at a time;
+each task keeps its own saves and unlabeled work, so switching loses nothing.
 
 ## Workflow
 
-1. ply new "Short title" --description "what and why"   # creates a task + workspace folder; cd into it
+1. ply new "Short title" --description "what and why"   # creates a task and shows it in this folder
 2. Edit files normally. Every save is recorded automatically.
 3. ply label "What changed"        # mark a good point as a change (ply label --edit folds more work into the last one)
 4. ply share                       # send labeled changes to the server for review
 5. ply ready                       # mark the task ready for review when it's done
 
 Repeat 2-4 as needed. Read feedback with ply review; reply with ply note "...".
+For a small fix, ply ship "Fix typo" [files...] wraps unlabeled work into its own task and applies it.
 
 ## Useful commands
 
@@ -24,12 +26,14 @@ Repeat 2-4 as needed. Read feedback with ply review; reply with ply note "...".
 - ply conflicts     list conflicts; resolve by editing out the markers (or deleting one of the two
                     side-by-side binary copies), then label and share
 - ply undo          undo the last action; ply history + ply undo <save> to go back to any save
-- ply tasks         list tasks; ply get <task> to make a workspace for an existing task
-- ply new "..." --copy-ignored   reuse node_modules etc. from the current workspace
+- ply tasks         list tasks; ply switch <task> shows one in this folder (ply switch project: the project)
+- ply new "..." --on               build on the task this folder shows (--on <task>: any task)
+- ply new "..." --separate         an extra folder (ignored files like node_modules are copied over),
+                                   for working in parallel with another agent; ply remove deletes it
 
 ## Rules
 
-- Never edit an exported folder expecting Ply to notice; work only in workspaces.
+- Never edit an exported folder expecting Ply to notice; work only in project folders.
 - Add --json to any command for machine-readable output. Commands never prompt.
 - Errors name the command that fixes them, e.g. "run ` + "`ply refresh`" + `". Run it and retry.
 - Project-specific instructions live in the project's AGENTS.md.

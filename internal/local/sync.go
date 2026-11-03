@@ -21,6 +21,9 @@ type ShareResult struct {
 // Share sends the task's labeled changes to the server. It refuses if
 // someone else shared newer changes since this workspace last synced.
 func (w *WS) Share(ctx context.Context) (*ShareResult, error) {
+	if err := w.needTask(); err != nil {
+		return nil, err
+	}
 	cur, _, err := w.CatchUp(ctx)
 	if err != nil {
 		return nil, err
@@ -130,6 +133,9 @@ type RefreshResult struct {
 // to this task, then with what the task is built on. Labeled and unlabeled
 // work both come along; overlapping edits become conflicts.
 func (w *WS) Refresh(ctx context.Context) (*RefreshResult, error) {
+	if w.Task == 0 {
+		return w.refreshProject(ctx)
+	}
 	if _, _, err := w.CatchUp(ctx); err != nil {
 		return nil, err
 	}
@@ -280,7 +286,7 @@ func (w *WS) Refresh(ctx context.Context) (*RefreshResult, error) {
 		if err != nil {
 			return err
 		}
-		if err := recordAction(tx, w.ID, "refresh", "refresh: "+joinSteps(res.Steps), before, withFiles(after, files)); err != nil {
+		if err := recordAction(tx, w, "refresh", "refresh: "+joinSteps(res.Steps), before, withFiles(after, files)); err != nil {
 			return err
 		}
 		_, _, err = w.catchUp(tx)
@@ -333,7 +339,7 @@ func (w *WS) carryUnlabeled(tx *store.Tx, oldLabeled, files, newLabeled store.Ha
 
 // ConflictList returns the workspace's unresolved conflicts.
 func (w *WS) ConflictList(ctx context.Context) ([]store.Conflict, error) {
-	if _, _, err := w.CatchUp(ctx); err != nil {
+	if _, _, err := w.CatchUp(ctx); err != nil || w.Task == 0 {
 		return nil, err
 	}
 	var cs []store.Conflict
@@ -345,30 +351,129 @@ func (w *WS) ConflictList(ctx context.Context) ([]store.Conflict, error) {
 	return cs, err
 }
 
-// Approve applies a task. Run in that task's workspace, it first checks that
-// all labeled work has been shared.
-func (e *Env) Approve(ctx context.Context, ref, projectName string) ([]store.Version, error) {
+// ApproveResult says what approving did.
+type ApproveResult struct {
+	Versions []store.Version `json:"versions"`
+	// ShowsProject is set when the folder showed the approved task and now
+	// shows the project at this version.
+	ShowsProject int64 `json:"folder_shows_project,omitempty"`
+}
+
+// Approve applies a task. Run in a folder showing that task, it first checks
+// that all labeled work has been shared, and afterwards (if there's no
+// unlabeled work left behind) moves the folder on to show the project.
+func (e *Env) Approve(ctx context.Context, ref, projectName string) (*ApproveResult, error) {
 	id, err := project.ParseTask(ref)
 	if err != nil {
 		return nil, err
 	}
 	if w, err := e.Workspace(); err == nil {
 		defer w.Close()
-		if w.Task == id {
-			if n, _ := w.unsharedCount(ctx); n > 0 {
-				return nil, plyerr.New(plyerr.State, "ply share", "task #%d has %d labeled changes that aren't shared yet", id, n)
-			}
+		if w.Task != id {
+			vs, err := w.Client.Approve(ctx, id)
+			return &ApproveResult{Versions: vs}, err
 		}
-		return w.Client.Approve(ctx, id)
+		if n, _ := w.unsharedCount(ctx); n > 0 {
+			return nil, plyerr.New(plyerr.State, "ply share", "task #%d has %d labeled changes that aren't shared yet", id, n)
+		}
+		vs, err := w.Client.Approve(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		res := &ApproveResult{Versions: vs}
+		if tg, err := w.prepare(ctx, 0); err == nil {
+			w.DB.Write(ctx, func(tx *store.Tx) error {
+				cur, h, err := w.catchUp(tx)
+				if err != nil {
+					return err
+				}
+				if labeled, err := w.labeled(tx); err != nil || labeled != h {
+					return err // unlabeled work: stay on the task
+				}
+				// The task's local state reflects that it's applied.
+				if t, err := tx.Task(id); err == nil {
+					t.Status = store.StatusApplied
+					tx.PutTask(&t)
+				}
+				if err := w.show(tx, cur, tg); err != nil {
+					return err
+				}
+				res.ShowsProject = w.BaseVersion
+				return nil
+			})
+		}
+		w.prune(ctx)
+		return res, nil
 	}
 	p, err := e.Project(projectName)
 	if err != nil {
 		return nil, err
 	}
 	defer p.Close()
-	return p.Client.Approve(ctx, id)
+	vs, err := p.Client.Approve(ctx, id)
+	return &ApproveResult{Versions: vs}, err
 }
 
 func applyFiles(tx *store.Tx, w *WS, cur, target *store.Snapshot) error {
 	return workspace.Apply(tx, w.ID, w.Root, cur, target, nil)
+}
+
+// refreshProject moves a folder showing the project to the latest version,
+// carrying any edits made in it.
+func (w *WS) refreshProject(ctx context.Context) (*RefreshResult, error) {
+	st, err := w.Client.State(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	head := st.Head
+	if err := w.Client.Fetch(ctx, w.DB, []store.Hash{head.Snapshot}, w.haveSnapshots(ctx)); err != nil {
+		return nil, err
+	}
+	res := &RefreshResult{BuiltOn: fmt.Sprintf("project #%d", head.Num)}
+	err = w.DB.Write(ctx, func(tx *store.Tx) error {
+		curSnap, cur, err := w.catchUp(tx)
+		if err != nil {
+			return err
+		}
+		if head.Snapshot == w.BaseSnapshot {
+			res.UpToDate = true
+			return nil
+		}
+		before, err := w.state(tx)
+		if err != nil {
+			return err
+		}
+		files := head.Snapshot
+		if cur != w.BaseSnapshot {
+			m, err := w.merge3(tx, w.BaseSnapshot, cur, head.Snapshot, "your edits", fmt.Sprintf("project #%d", head.Num))
+			if err != nil {
+				return err
+			}
+			if len(m.Conflicts) > 0 {
+				return conflictRefusal(m.Conflicts, fmt.Sprintf("your edits conflict with project #%d", head.Num))
+			}
+			res.Notices = m.Notices
+			if files, err = tx.PutSnapshot(m.Snapshot); err != nil {
+				return err
+			}
+		}
+		target, err := tx.Snapshot(files)
+		if err != nil {
+			return err
+		}
+		if err := applyFiles(tx, w, curSnap, target); err != nil {
+			return err
+		}
+		if err := w.setBase(tx, head.Num, head.Snapshot); err != nil {
+			return err
+		}
+		res.Steps = []string{fmt.Sprintf("refreshed to project #%d", head.Num)}
+		after, _ := w.state(tx)
+		if err := recordAction(tx, w, "refresh", "refresh: "+res.Steps[0], withFiles(before, cur), withFiles(after, files)); err != nil {
+			return err
+		}
+		_, _, err = w.catchUp(tx)
+		return err
+	})
+	return res, err
 }

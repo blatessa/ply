@@ -21,8 +21,8 @@ Three things matter: the project, tasks, and workspaces. The rest are the action
 | --- | --- |
 | **Project** | The current state of the code: the result of every approved task, applied in order. Read-only. Nobody works in it directly; it only changes when a task is approved. Its history is the list of applied tasks; each approval makes a new numbered version (#1, #2, ...). |
 | **Task** | A piece of work: a title and a short description of what and why, plus its labeled changes, its notes, the person responsible for it, and who's working on it. What gets shared and reviewed. |
-| **Workspace** | A normal folder on your machine for one task, holding a full copy of the files. Where work actually happens. One task, one workspace. |
-| **Save** | A snapshot recorded every time a file in a workspace is saved. Builds the workspace's timeline, so anything can be undone. Local only; never shared. |
+| **Workspace** | A normal folder on your machine showing one task's files at a time. Where work actually happens. Usually one folder per project; switching it to another task keeps each task's work separate. |
+| **Save** | A snapshot recorded every time a file in a workspace is saved. Builds the task's timeline, so anything can be undone. Local only; never shared. |
 | **Change** | A labeled point in a workspace's timeline ("Handle + in emails"). A task's changes are what reviewers see and what gets applied. |
 | **Share** | Share a task's latest labeled changes with the server, so others can see and review them. |
 | **Refresh** | Bring a workspace up to date with what its task is built on: the current project, or the task underneath. Only happens when you run it. |
@@ -36,7 +36,7 @@ Three things matter: the project, tasks, and workspaces. The rest are the action
 
 A task goes from created to applied in five steps, repeating steps 2–4 until it's approved.
 
-1. **Create a task.** A workspace folder is made for it from the current project.
+1. **Create a task.** The folder you're in switches to it, starting from the current project.
 2. **Work.** A person or agent edits files. Every save is recorded.
 3. **Label changes** at good spots. Until the task is approved, a change can still be edited (fold a typo fix into it instead of adding a new change).
 4. **Share the task.** Its labeled changes go to the server, where others can see and review them. Share as often as you like. If someone else shared newer changes to the same task, Ply refuses until you refresh. When it's finished, mark it ready (`ply ready`) so people know it's not a draft.
@@ -44,7 +44,7 @@ A task goes from created to applied in five steps, repeating steps 2–4 until i
    - Approve → the task is applied to the project. Who can approve is a project setting (default: anyone, people or agents; can optionally require a passing check). If other tasks were applied in the meantime, approve combines with them itself. It refuses only on a real conflict, which needs a refresh.
    - Not ready → leave notes on the task. Whoever's on it keeps working in the same workspace and shares again.
 
-When the task is done, removing its workspace removes its saves too. The labeled changes stay with the task, in the project's history.
+Saves belong to the task and are kept until it's applied or closed. The labeled changes stay with the task, in the project's history.
 
 Statuses: **open**, **ready**, **applied**, **closed**. `ply close` closes a task without applying it; it can be reopened. Ready is a signal, not a gate: sharing more keeps a task ready, and approving doesn't require it unless the project's settings say so. If applied work turns out to be wrong, `ply revert <task>` creates a new task that undoes it.
 
@@ -52,7 +52,7 @@ Statuses: **open**, **ready**, **applied**, **closed**. `ply close` closes a tas
 
 You shouldn't have to wait for approval to keep going. A task can be based on another task instead of the project.
 
-- `ply new "Add password reset"`, run inside the "Fix login bug" workspace, starts the new task on top of that task's latest change. Outside any workspace, `ply new` starts from the project. `--on project` or `--on <task>` picks explicitly. Ply always says what the new task is built on.
+- `ply new "Add password reset" --on`, run in a folder showing "Fix login bug", starts the new task on top of that task's latest change. Without `--on`, `ply new` starts from the project; `--on <task>` builds on any task. Ply always says what the new task is built on.
 - If the earlier task gets more changes, `ply refresh` brings them in, same as catching up with the project.
 - If a task underneath gets new or edited changes, Ply marks the tasks on top as needing a refresh. When the earlier task is applied, the later one is simply based on the project again.
 - Tasks can stack more than one deep. Each task shows only its own changes. Approving a task that's built on others applies them first, in order, then this one.
@@ -64,10 +64,13 @@ Every command does one thing, and only commands change files. Commands run insid
 
 | Command | What it does |
 | --- | --- |
-| `ply join <url>` | Connect to a project on a server. Opens the browser to sign in. |
-| `ply new "Fix login bug"` | Create a task and its workspace folder: from the current project, or on top of the current task when run inside a workspace. |
-| `ply new "..." --on <task>` | Pick what a new task builds on: the project or another task. Without it, a task created inside a workspace builds on that workspace's task. |
-| `ply new "..." --copy-ignored` | Also copy ignored files like node\_modules from the current workspace, so a new workspace doesn't reinstall everything. |
+| `ply join <url>` | Connect to a project on a server and make a folder for it. Opens the browser to sign in. |
+| `ply start <url>` | Create a project from the current folder: its files become a first task, "Initial files", and the folder becomes the project's folder. |
+| `ply new "Fix login bug"` | Create a task from the current project and show it in this folder. The task you leave keeps its unlabeled work. |
+| `ply new "..." --on [<task>]` | Build on the task this folder shows, or on any task. |
+| `ply new "..." --separate` | Make an extra folder for the task instead (copying ignored files like node\_modules over), for parallel work. |
+| `ply switch <task>` | Show another task in this folder: yours or anyone's. Unlabeled work stays with the task you left; switching back restores it. Ignored files aren't touched. |
+| `ply ship "Fix typo"` | Wrap what you just changed into its own small task and apply it, if the project lets you approve your own tasks; otherwise share it, ready for review. |
 | `ply status` | What's unlabeled, any conflicts, what the task is built on, and whether it needs a refresh. |
 | `ply diff` | Show changes: unlabeled work, or a task's changes. |
 | `ply tasks` | List tasks, who's on them, and their status. |
@@ -84,8 +87,7 @@ Every command does one thing, and only commands change files. Commands run insid
 | `ply approve <task>` | Apply the task (and any tasks under it) to the project. Combines with newer work itself; refuses only on a conflict. |
 | `ply note <task> "notes"` | Add a note to a task. |
 | `ply revert <task>` | Create a new task that undoes an applied task. |
-| `ply get <task>` | Make a workspace for an existing task (to review it closely or take it over). |
-| `ply remove` | Remove this task's workspace and its saves. |
+| `ply remove` | Remove an extra folder. The task's work stays. |
 | `ply export <folder> [--at <task>]` | Write the project's files as a plain, untracked folder. --at \<task> exports the project as of an applied task; --task \<task> exports an open task's latest version. |
 | `ply log` | The project's history: applied tasks, newest first. |
 | `ply skill` | Print the instructions file an agent loads to learn Ply. |
@@ -229,7 +231,7 @@ An agent on your machine codes, labels and shares tasks for you, under your name
 - Every command takes `--json` and never prompts when given its arguments.
 - Errors say what went wrong and the command that fixes it ("project has changed: run `ply refresh`").
 - `ply skill` prints a short instructions file an agent loads to learn Ply. Project-specific instructions stay in the project's own AGENTS.md.
-- `ply new --copy-ignored` also copies ignored files like `node_modules` from your current workspace (copy-on-write where possible), so a parallel agent doesn't reinstall everything.
+- `ply new --separate` makes an extra folder and copies ignored files like `node_modules` into it (copy-on-write where possible), so a parallel agent doesn't reinstall everything.
 
 **2. Agents as integrations**
 

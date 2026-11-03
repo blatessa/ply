@@ -58,6 +58,9 @@ func Scan(tx *store.Tx, wsID int64, root string) (*store.Snapshot, error) {
 				continue
 			}
 			if de.IsDir() {
+				if isFolder(abs) {
+					continue // another workspace folder nested inside this one
+				}
 				if err := walk(abs, p); err != nil {
 					return err
 				}
@@ -205,3 +208,12 @@ func txQuery(tx *store.Tx, q string, args ...any) (*sql.Rows, error) { return tx
 func abs(root, p string) string {
 	return filepath.Join(root, filepath.FromSlash(p))
 }
+
+// isFolder reports whether dir is a workspace folder (has a marker).
+func isFolder(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, MarkerName))
+	return err == nil
+}
+
+// IsFolder reports whether dir is a workspace folder.
+func IsFolder(dir string) bool { return isFolder(dir) }

@@ -131,4 +131,39 @@ CREATE TABLE scan (
 ALTER TABLE task ADD COLUMN conflicts TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE task ADD COLUMN synced_snapshot BLOB;
 `,
+	// 3: a folder shows one task at a time (task 0: the project itself, with
+	// its own base). Saves and actions belong to the task, not the folder, so
+	// switching away keeps them; a task-0 timeline belongs to its folder
+	// (workspace is 0 for real tasks). main marks the project's own folder.
+	`
+ALTER TABLE workspace ADD COLUMN main INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace ADD COLUMN base_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace ADD COLUMN base_snapshot BLOB;
+
+CREATE TABLE save3 (
+	id        INTEGER PRIMARY KEY,
+	task      INTEGER NOT NULL,
+	workspace INTEGER NOT NULL DEFAULT 0,
+	snapshot  BLOB NOT NULL,
+	at        INTEGER NOT NULL
+);
+INSERT INTO save3 SELECT s.id, w.task, 0, s.snapshot, s.at FROM save s JOIN workspace w ON w.id = s.workspace;
+DROP TABLE save;
+ALTER TABLE save3 RENAME TO save;
+CREATE INDEX save_timeline ON save(task, workspace, id);
+
+CREATE TABLE action3 (
+	id        INTEGER PRIMARY KEY,
+	task      INTEGER NOT NULL,
+	workspace INTEGER NOT NULL DEFAULT 0,
+	kind      TEXT NOT NULL,
+	data      TEXT NOT NULL,
+	at        INTEGER NOT NULL,
+	undone    INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO action3 SELECT a.id, w.task, 0, a.kind, a.data, a.at, a.undone FROM action a JOIN workspace w ON w.id = a.workspace;
+DROP TABLE action;
+ALTER TABLE action3 RENAME TO action;
+CREATE INDEX action_timeline ON action(task, workspace, id);
+`,
 }

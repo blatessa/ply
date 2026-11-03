@@ -8,106 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/blatessa/ply/internal/client"
 	"github.com/blatessa/ply/internal/merge"
 	"github.com/blatessa/ply/internal/plyerr"
 	"github.com/blatessa/ply/internal/project"
 	"github.com/blatessa/ply/internal/store"
 	"github.com/blatessa/ply/internal/workspace"
 )
-
-// Join connects this machine to a project. Workspaces will be created in dir.
-func (e *Env) Join(ctx context.Context, url, dir string) (*workspace.Project, error) {
-	p, err := e.Cfg.AddProject(url, dir)
-	if err != nil {
-		return nil, plyerr.New(plyerr.Invalid, "", "%v", err)
-	}
-	c := client.New(p.URL, e.Cfg.User, p.Token)
-	if _, err := c.State(ctx, false); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	return p, e.Cfg.Save()
-}
-
-// NewResult describes a created workspace.
-type NewResult struct {
-	Task    project.TaskInfo `json:"task"`
-	Path    string           `json:"path"`
-	BuiltOn string           `json:"built_on"`
-	Warning string           `json:"warning,omitempty"`
-}
-
-// NewOptions configure a new task.
-type NewOptions struct {
-	Title       string
-	Description string
-	// On is "project", a task reference, or "" for the default: the current
-	// workspace's task if in one, else the project.
-	On          string
-	CopyIgnored bool
-	Path        string // where to put the workspace; default under the project folder
-	Project     string
-}
-
-// New creates a task and its workspace.
-func (e *Env) New(ctx context.Context, o NewOptions) (*NewResult, error) {
-	cur, curErr := e.Workspace()
-	var p *Proj
-	if curErr == nil {
-		p = cur.Proj
-	} else {
-		var err error
-		if p, err = e.Project(o.Project); err != nil {
-			return nil, err
-		}
-	}
-	defer p.Close()
-
-	var on int64
-	var warning string
-	switch {
-	case o.On == "project":
-	case o.On != "":
-		id, err := project.ParseTask(o.On)
-		if err != nil {
-			return nil, err
-		}
-		on = id
-	case cur != nil:
-		on = cur.Task
-	}
-	if cur != nil && on == cur.Task {
-		if n, _ := cur.unsharedCount(ctx); n > 0 {
-			warning = fmt.Sprintf("task #%d has %d labeled changes that aren't shared; the new task builds on its last shared change (run `ply share` in that workspace, then `ply refresh` here)", cur.Task, n)
-		}
-	}
-	info, err := p.Client.CreateTask(ctx, o.Title, o.Description, on)
-	if err != nil {
-		return nil, err
-	}
-	path := o.Path
-	if path == "" {
-		path = filepath.Join(p.Dir, Slug(info.Title))
-		if _, err := os.Stat(path); err == nil {
-			path = fmt.Sprintf("%s-%d", path, info.ID)
-		}
-	}
-	var from string
-	if o.CopyIgnored {
-		if cur == nil {
-			return nil, plyerr.New(plyerr.Invalid, "", "--copy-ignored copies from the current workspace; run it inside one")
-		}
-		from = cur.Root
-	}
-	if err := p.makeWorkspace(ctx, info, path, from); err != nil {
-		return nil, err
-	}
-	res := &NewResult{Task: *info, Path: path, BuiltOn: builtOn(info.Task), Warning: warning}
-	return res, nil
-}
 
 func builtOn(t store.Task) string {
 	if t.BaseTask != 0 {
@@ -116,114 +22,15 @@ func builtOn(t store.Task) string {
 	return fmt.Sprintf("project #%d", t.BaseVersion)
 }
 
-// Get makes a workspace for an existing task.
-func (e *Env) Get(ctx context.Context, ref, path, projectName string) (*NewResult, error) {
-	id, err := project.ParseTask(ref)
-	if err != nil {
-		return nil, err
-	}
-	p, err := e.Project(projectName)
-	if err != nil {
-		return nil, err
-	}
-	defer p.Close()
-	info, err := p.Client.Task(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if path == "" {
-		path = filepath.Join(p.Dir, Slug(info.Title))
-		if _, err := os.Stat(path); err == nil {
-			path = fmt.Sprintf("%s-%d", path, info.ID)
-		}
-	}
-	if err := p.makeWorkspace(ctx, info, path, ""); err != nil {
-		return nil, err
-	}
-	return &NewResult{Task: *info, Path: path, BuiltOn: builtOn(info.Task)}, nil
-}
-
-// makeWorkspace creates the folder for a task at its latest shared state.
-func (p *Proj) makeWorkspace(ctx context.Context, info *project.TaskInfo, path, copyIgnoredFrom string) error {
-	path, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	if entries, err := os.ReadDir(path); err == nil && len(entries) > 0 {
-		return plyerr.New(plyerr.Invalid, "", "%s already exists and isn't empty", path)
-	}
-	var existing string
-	p.DB.Read(ctx, func(tx *store.Tx) error {
-		return tx.QueryRow("SELECT path FROM workspace WHERE task = ?", info.ID).Scan(&existing)
-	})
-	if existing != "" {
-		return plyerr.New(plyerr.Invalid, "cd "+existing, "task #%d already has a workspace on this machine at %s", info.ID, existing)
-	}
-	if err := p.Client.Fetch(ctx, p.DB, []store.Hash{info.Latest, info.BaseSnapshot}, p.haveSnapshots(ctx)); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return err
-	}
-	ws := &WS{Proj: p, Root: path, Task: info.ID}
-	err = p.DB.Write(ctx, func(tx *store.Tx) error {
-		t := info.Task
-		t.SyncedSnapshot = info.Latest
-		if err := tx.PutTask(&t); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("DELETE FROM change WHERE task = ?", t.ID); err != nil {
-			return err
-		}
-		for _, c := range info.Changes {
-			c.Shared = true
-			if err := tx.PutChange(&c); err != nil {
-				return err
-			}
-		}
-		res, err := tx.Exec("INSERT INTO workspace (path, task, created_at) VALUES (?, ?, ?)", path, t.ID, time.Now().UnixMilli())
-		if err != nil {
-			return err
-		}
-		if ws.ID, err = res.LastInsertId(); err != nil {
-			return err
-		}
-		snap, err := tx.Snapshot(info.Latest)
-		if err != nil {
-			return err
-		}
-		donors, err := workspace.LoadDonors(tx)
-		if err != nil {
-			return err
-		}
-		if err := workspace.Materialize(tx, ws.ID, path, snap, donors); err != nil {
-			return err
-		}
-		mk := &workspace.Workspace{Root: path, Marker: workspace.Marker{Project: p.URL, Task: t.ID}}
-		if err := mk.WriteMarker(); err != nil {
-			return err
-		}
-		if copyIgnoredFrom != "" {
-			if err := workspace.CopyIgnored(copyIgnoredFrom, path); err != nil {
-				return fmt.Errorf("copy ignored files: %w", err)
-			}
-		}
-		_, _, err = ws.catchUp(tx)
-		return err
-	})
-	if err != nil {
-		os.RemoveAll(path)
-	}
-	return err
-}
-
 // haveSnapshots lists snapshots this machine has, so fetches skip content
 // they share: the project head and each workspace's task state.
 func (p *Proj) haveSnapshots(ctx context.Context) []store.Hash {
 	var out []store.Hash
 	p.DB.Read(ctx, func(tx *store.Tx) error {
-		rows, err := tx.Query(`SELECT base_snapshot FROM task WHERE id IN (SELECT task FROM workspace)
-			UNION SELECT synced_snapshot FROM task WHERE synced_snapshot IS NOT NULL AND id IN (SELECT task FROM workspace)`)
+		rows, err := tx.Query(`WITH local(id) AS (SELECT task FROM workspace UNION SELECT DISTINCT task FROM save)
+			SELECT base_snapshot FROM task WHERE id IN local
+			UNION SELECT synced_snapshot FROM task WHERE synced_snapshot IS NOT NULL AND id IN local
+			UNION SELECT base_snapshot FROM workspace WHERE base_snapshot IS NOT NULL`)
 		if err != nil {
 			return err
 		}
@@ -241,8 +48,12 @@ func (p *Proj) haveSnapshots(ctx context.Context) []store.Hash {
 
 // Status is a workspace's state.
 type Status struct {
+	// Task is the task the folder shows; its ID is 0 when the folder shows
+	// the project itself (Project is then the version).
 	Task      store.Task       `json:"task"`
+	Project   int64            `json:"project,omitempty"`
 	Path      string           `json:"path"`
+	Folders   []Folder         `json:"other_folders,omitempty"`
 	BuiltOn   string           `json:"built_on"`
 	Unlabeled []store.Delta    `json:"unlabeled"`
 	Unshared  int              `json:"unshared_changes"`
@@ -264,6 +75,12 @@ func (w *WS) Status(ctx context.Context) (*Status, error) {
 		return nil, err
 	}
 	st := &Status{Path: w.Root}
+	if st.Folders, err = w.otherFolders(ctx); err != nil {
+		return nil, err
+	}
+	if w.Task == 0 {
+		return w.projectStatus(ctx, st, cur)
+	}
 	err = w.DB.Read(ctx, func(tx *store.Tx) error {
 		t, err := tx.Task(w.Task)
 		if err != nil {
@@ -325,6 +142,25 @@ func (w *WS) refreshReason(ctx context.Context, local store.Task, remote *projec
 	return fmt.Sprintf("the project has moved on to #%d", up.Version)
 }
 
+// projectStatus is the status of a folder showing the project.
+func (w *WS) projectStatus(ctx context.Context, st *Status, cur *store.Snapshot) (*Status, error) {
+	st.Project, st.BuiltOn = w.BaseVersion, fmt.Sprintf("project #%d", w.BaseVersion)
+	err := w.DB.Read(ctx, func(tx *store.Tx) error {
+		base, err := tx.Snapshot(w.BaseSnapshot)
+		st.Unlabeled = store.Diff(base, cur)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if s, err := w.Client.State(ctx, false); err != nil {
+		st.Server = err.Error()
+	} else if s.Head.Num != w.BaseVersion {
+		st.Refresh = fmt.Sprintf("the project has moved on to #%d", s.Head.Num)
+	}
+	return st, nil
+}
+
 func (w *WS) unsharedCount(ctx context.Context) (int, error) {
 	var n int
 	err := w.DB.Read(ctx, func(tx *store.Tx) error {
@@ -337,6 +173,9 @@ func (w *WS) unsharedCount(ctx context.Context) (int, error) {
 // work is folded into the latest change instead (and label, if non-empty,
 // renames it).
 func (w *WS) Label(ctx context.Context, label string, edit bool) (*store.Change, error) {
+	if err := w.needTask(); err != nil {
+		return nil, err
+	}
 	var out store.Change
 	err := w.DB.Write(ctx, func(tx *store.Tx) error {
 		_, cur, err := w.catchUp(tx)
@@ -397,7 +236,7 @@ func (w *WS) Label(ctx context.Context, label string, edit bool) (*store.Change,
 		if edit {
 			kind, desc = "label-edit", fmt.Sprintf("fold work into %q", out.Label)
 		}
-		return recordAction(tx, w.ID, kind, desc, before, after)
+		return recordAction(tx, w, kind, desc, before, after)
 	})
 	return &out, err
 }
@@ -417,12 +256,11 @@ func (w *WS) Diff(ctx context.Context) (*DiffResult, error) {
 		return nil, err
 	}
 	res := &DiffResult{From: "last label", To: "workspace"}
+	if w.Task == 0 {
+		res.From = w.what()
+	}
 	err = w.DB.Read(ctx, func(tx *store.Tx) error {
-		t, err := tx.Task(w.Task)
-		if err != nil {
-			return err
-		}
-		latest, err := tx.TaskSnapshot(t)
+		latest, err := w.labeled(tx)
 		if err != nil {
 			return err
 		}
@@ -494,34 +332,6 @@ func unifiedDeltas(tx *store.Tx, deltas []store.Delta) (string, error) {
 		}
 	}
 	return string(out), nil
-}
-
-// Remove deletes the workspace folder and its saves. It refuses if there is
-// work that would be lost, unless force is set.
-func (w *WS) Remove(ctx context.Context, force bool) error {
-	if !force {
-		st, err := w.Status(ctx)
-		if err != nil {
-			return err
-		}
-		if len(st.Unlabeled) > 0 {
-			return plyerr.New(plyerr.State, "ply remove --force", "the workspace has unlabeled work that would be lost; label and share it first, or")
-		}
-		if st.Unshared > 0 && st.ServerStatus != store.StatusApplied {
-			return plyerr.New(plyerr.State, "ply share", "the task has %d labeled changes that aren't shared", st.Unshared)
-		}
-	}
-	err := w.DB.Write(ctx, func(tx *store.Tx) error {
-		if _, err := tx.Exec("DELETE FROM workspace WHERE id = ?", w.ID); err != nil {
-			return err
-		}
-		_, err := tx.Exec("DELETE FROM change WHERE task = ?", w.Task)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	return os.RemoveAll(w.Root)
 }
 
 // ExportOptions say what to export.

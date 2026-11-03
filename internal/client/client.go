@@ -165,6 +165,18 @@ func (c *Client) Revert(ctx context.Context, id int64) (*project.TaskInfo, error
 	return &t, c.call(ctx, "POST", fmt.Sprintf("/tasks/%d/revert", id), struct{}{}, &t)
 }
 
+// Settings returns the project's settings.
+func (c *Client) Settings(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	return out, c.call(ctx, "GET", "/settings", nil, &out)
+}
+
+// SetSetting changes a project setting.
+func (c *Client) SetSetting(ctx context.Context, key, value string) (map[string]string, error) {
+	out := map[string]string{}
+	return out, c.call(ctx, "POST", "/settings", map[string]string{"key": key, "value": value}, &out)
+}
+
 // CreateProject makes a new project on the server at serverURL.
 func CreateProject(ctx context.Context, serverURL, user, name string) error {
 	c := New(strings.TrimRight(serverURL, "/"), user, "")

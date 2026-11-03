@@ -173,6 +173,16 @@ func (s *Server) Handler() http.Handler {
 		}
 		return pr.CreateTask(r.Context(), actor(r), req.Title, req.Description, req.On)
 	})
+	p("GET /settings", func(pr *project.Project, r *http.Request) (any, error) {
+		return pr.Settings(r.Context())
+	})
+	p("POST /settings", func(pr *project.Project, r *http.Request) (any, error) {
+		var req struct{ Key, Value string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return pr.SetSetting(r.Context(), req.Key, req.Value)
+	})
 	p("GET /tasks/{id}", func(pr *project.Project, r *http.Request) (any, error) {
 		id, err := taskID(r)
 		if err != nil {

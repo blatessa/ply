@@ -90,51 +90,117 @@ func (e *Env) Project(name string) (*Proj, error) {
 	return nil, plyerr.New(plyerr.Invalid, "", "more than one project is joined (%s); run this inside a workspace or pass --project", strings.Join(names, ", "))
 }
 
-// WS is an open workspace.
+// WS is an open workspace folder. A folder shows one task at a time; Task 0
+// means it shows the project itself, at BaseVersion.
 type WS struct {
 	*Proj
 	Root string
 	ID   int64
 	Task int64
+	Main bool // the project's own folder, made by join (extra folders aren't)
+	// The project version a folder showing the project is based on.
+	BaseVersion  int64
+	BaseSnapshot store.Hash
 }
 
-// Workspace opens the workspace containing the current directory.
+// timeline is the key of the saves and actions for what the folder shows:
+// a task's belong to the task; the project view's belong to the folder.
+func (w *WS) timeline() (task, folder int64) {
+	if w.Task == 0 {
+		return 0, w.ID
+	}
+	return w.Task, 0
+}
+
+// needTask refuses commands that need a task when the folder shows the
+// project.
+func (w *WS) needTask() error {
+	if w.Task == 0 {
+		return plyerr.New(plyerr.State, `ply new "Title"`, "this folder is showing the project, not a task; start one (your edits come along) with")
+	}
+	return nil
+}
+
+// what names what the folder shows, for messages.
+func (w *WS) what() string {
+	if w.Task == 0 {
+		return fmt.Sprintf("project #%d", w.BaseVersion)
+	}
+	return fmt.Sprintf("task #%d", w.Task)
+}
+
+const folderCols = "id, path, task, main, base_version, base_snapshot"
+
+func scanFolder(row interface{ Scan(...any) error }, w *WS) error {
+	var base []byte
+	if err := row.Scan(&w.ID, &w.Root, &w.Task, &w.Main, &w.BaseVersion, &base); err != nil {
+		return err
+	}
+	w.BaseSnapshot = store.EmptySnapshot
+	if len(base) == 32 {
+		w.BaseSnapshot = store.Hash(base)
+	}
+	return nil
+}
+
+// Workspace opens the workspace folder containing the current directory.
 func (e *Env) Workspace() (*WS, error) {
 	w, err := workspace.FindWorkspace(e.Dir)
 	if errors.Is(err, workspace.ErrNotInWorkspace) {
-		return nil, plyerr.New(plyerr.Invalid, "ply new \"...\"` or `ply get <task>", "not in a workspace")
+		return nil, plyerr.New(plyerr.Invalid, "cd <project folder>` or `ply join <url>", "not in a project folder")
 	}
 	if err != nil {
 		return nil, err
 	}
 	p := e.Cfg.Find(w.Project)
 	if p == nil {
-		return nil, plyerr.New(plyerr.NotFound, "ply join "+w.Project, "this workspace's project (%s) isn't joined on this machine", w.Project)
+		return nil, plyerr.New(plyerr.NotFound, "ply join "+w.Project, "this folder's project (%s) isn't joined on this machine", w.Project)
 	}
 	proj, err := e.open(p)
 	if err != nil {
 		return nil, err
 	}
-	ws := &WS{Proj: proj, Root: w.Root, Task: w.Task}
+	ws := &WS{Proj: proj}
 	err = proj.DB.Write(context.Background(), func(tx *store.Tx) error {
-		err := tx.QueryRow("SELECT id FROM workspace WHERE path = ?", w.Root).Scan(&ws.ID)
+		err := scanFolder(tx.QueryRow("SELECT "+folderCols+" FROM workspace WHERE path = ?", w.Root), ws)
 		if errors.Is(err, sql.ErrNoRows) {
-			// The folder moved: find it by task.
-			err = tx.QueryRow("SELECT id FROM workspace WHERE task = ?", w.Task).Scan(&ws.ID)
+			// The folder moved: find it by ID (or, for old markers, by task),
+			// as long as its old path is gone.
+			q, arg := "SELECT "+folderCols+" FROM workspace WHERE id = ?", w.Folder
+			if w.Folder == 0 {
+				q, arg = "SELECT "+folderCols+" FROM workspace WHERE task = ? AND task != 0", w.Task
+			}
+			err = scanFolder(tx.QueryRow(q, arg), ws)
 			if err == nil {
-				_, err = tx.Exec("UPDATE workspace SET path = ? WHERE id = ?", w.Root, ws.ID)
+				if _, serr := os.Stat(ws.Root); serr == nil {
+					err = sql.ErrNoRows // a copy, not a move
+				} else {
+					ws.Root = w.Root
+					_, err = tx.Exec("UPDATE workspace SET path = ? WHERE id = ?", w.Root, ws.ID)
+				}
 			}
 		}
 		if errors.Is(err, sql.ErrNoRows) {
-			return plyerr.New(plyerr.NotFound, fmt.Sprintf("ply get %d", w.Task), "this folder's workspace was removed")
+			return plyerr.New(plyerr.NotFound, "ply switch <task> --separate", "this folder isn't one of this machine's project folders (it was removed or copied); make a new one with")
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		if w.Task != ws.Task || w.Folder != ws.ID {
+			return ws.writeMarker()
+		}
+		return nil
 	})
 	if err != nil {
 		proj.Close()
 		return nil, err
 	}
 	return ws, nil
+}
+
+func (w *WS) writeMarker() error {
+	mk := &workspace.Workspace{Root: w.Root, Marker: workspace.Marker{Project: w.URL, Task: w.Task, Folder: w.ID}}
+	return mk.WriteMarker()
 }
 
 // Save is a recorded snapshot of a workspace.
@@ -163,16 +229,18 @@ func (w *WS) catchUp(tx *store.Tx) (*store.Snapshot, store.Hash, error) {
 	if err != nil {
 		return nil, store.Hash{}, err
 	}
-	t, err := tx.Task(w.Task)
-	if err != nil {
-		return nil, store.Hash{}, err
-	}
-	if len(t.Conflicts) > 0 {
-		if changed, err := w.resolveConflicts(tx, &t, snap); err != nil {
+	if w.Task != 0 {
+		t, err := tx.Task(w.Task)
+		if err != nil {
 			return nil, store.Hash{}, err
-		} else if changed {
-			if snap, err = workspace.Scan(tx, w.ID, w.Root); err != nil {
+		}
+		if len(t.Conflicts) > 0 {
+			if changed, err := w.resolveConflicts(tx, &t, snap); err != nil {
 				return nil, store.Hash{}, err
+			} else if changed {
+				if snap, err = workspace.Scan(tx, w.ID, w.Root); err != nil {
+					return nil, store.Hash{}, err
+				}
 			}
 		}
 	}
@@ -180,12 +248,43 @@ func (w *WS) catchUp(tx *store.Tx) (*store.Snapshot, store.Hash, error) {
 	if err != nil {
 		return nil, h, err
 	}
-	var last []byte
-	err = tx.QueryRow("SELECT snapshot FROM save WHERE workspace = ? ORDER BY id DESC LIMIT 1", w.ID).Scan(&last)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && store.Hash(last) != h) {
-		_, err = tx.Exec("INSERT INTO save (workspace, snapshot, at) VALUES (?, ?, ?)", w.ID, h[:], time.Now().UnixMilli())
-	}
+	err = recordSave(tx, w, h)
 	return snap, h, err
+}
+
+// recordSave adds a save to the folder's current timeline unless it matches
+// the last one.
+func recordSave(tx *store.Tx, w *WS, h store.Hash) error {
+	task, folder := w.timeline()
+	last, ok, err := lastSave(tx, task, folder)
+	if err != nil || (ok && last == h) {
+		return err
+	}
+	_, err = tx.Exec("INSERT INTO save (task, workspace, snapshot, at) VALUES (?, ?, ?, ?)", task, folder, h[:], time.Now().UnixMilli())
+	return err
+}
+
+// lastSave returns a timeline's latest save.
+func lastSave(tx *store.Tx, task, folder int64) (store.Hash, bool, error) {
+	var b []byte
+	err := tx.QueryRow("SELECT snapshot FROM save WHERE task = ? AND workspace = ? ORDER BY id DESC LIMIT 1", task, folder).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.Hash{}, false, nil
+	}
+	return store.Hash(b), err == nil, err
+}
+
+// labeled is the labeled state the folder's files are compared against: the
+// task's latest change, or the project version a project view is based on.
+func (w *WS) labeled(tx *store.Tx) (store.Hash, error) {
+	if w.Task == 0 {
+		return w.BaseSnapshot, nil
+	}
+	t, err := tx.Task(w.Task)
+	if err != nil {
+		return store.Hash{}, err
+	}
+	return tx.TaskSnapshot(t)
 }
 
 // resolveConflicts drops conflicts that are resolved in the workspace: text

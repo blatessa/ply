@@ -173,7 +173,7 @@ func (w *watcher) addTree(root, dir string) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
-		if rel != "." && m.Match(filepath.ToSlash(rel), true) {
+		if rel != "." && (m.Match(filepath.ToSlash(rel), true) || workspace.IsFolder(p)) {
 			return filepath.SkipDir
 		}
 		if _, ok := w.dirs[p]; !ok {

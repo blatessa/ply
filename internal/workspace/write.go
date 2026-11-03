@@ -194,7 +194,7 @@ func CopyIgnored(from, to string) error {
 				if err := copyTree(filepath.Join(from, p), filepath.Join(to, p)); err != nil {
 					return err
 				}
-			} else if de.IsDir() {
+			} else if de.IsDir() && !isFolder(filepath.Join(from, p)) {
 				if err := walk(p); err != nil {
 					return err
 				}

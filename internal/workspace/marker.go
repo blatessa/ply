@@ -12,8 +12,9 @@ const MarkerName = ".ply"
 
 // Marker is the content of a workspace's .ply file.
 type Marker struct {
-	Project string `json:"project"` // project URL
-	Task    int64  `json:"task"`
+	Project string `json:"project"`          // project URL
+	Task    int64  `json:"task"`             // the task shown; 0 is the project itself
+	Folder  int64  `json:"folder,omitempty"` // this folder's ID on this machine
 }
 
 // Workspace is a workspace folder on this machine.

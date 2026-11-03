@@ -39,17 +39,41 @@ func captureState(tx *store.Tx, t store.Task) (wsState, error) {
 		Conflicts: t.Conflicts, Changes: cs}, err
 }
 
+// state captures what the folder shows now.
+func (w *WS) state(tx *store.Tx) (wsState, error) {
+	if w.Task == 0 {
+		return wsState{BaseVersion: w.BaseVersion, BaseSnapshot: w.BaseSnapshot}, nil
+	}
+	t, err := tx.Task(w.Task)
+	if err != nil {
+		return wsState{}, err
+	}
+	return captureState(tx, t)
+}
+
+// setBase moves a project view to another project version.
+func (w *WS) setBase(tx *store.Tx, version int64, snap store.Hash) error {
+	w.BaseVersion, w.BaseSnapshot = version, snap
+	_, err := tx.Exec("UPDATE workspace SET base_version = ?, base_snapshot = ? WHERE id = ?", version, snap[:], w.ID)
+	return err
+}
+
 func withFiles(s wsState, h store.Hash) wsState {
 	s.Files = &h
 	return s
 }
 
-func recordAction(tx *store.Tx, wsID int64, kind, desc string, before, after wsState) error {
-	b, err := json.Marshal(actionData{Desc: desc, Before: before, After: after})
+func recordAction(tx *store.Tx, w *WS, kind, desc string, before, after wsState) error {
+	return insertAction(tx, w, kind, actionData{Desc: desc, Before: before, After: after})
+}
+
+func insertAction(tx *store.Tx, w *WS, kind string, a actionData) error {
+	b, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec("INSERT INTO action (workspace, kind, data, at) VALUES (?, ?, ?, ?)", wsID, kind, string(b), time.Now().UnixMilli())
+	task, folder := w.timeline()
+	_, err = tx.Exec("INSERT INTO action (task, workspace, kind, data, at) VALUES (?, ?, ?, ?, ?)", task, folder, kind, string(b), time.Now().UnixMilli())
 	return err
 }
 
@@ -57,11 +81,14 @@ func recordAction(tx *store.Tx, wsID int64, kind, desc string, before, after wsS
 // now. If s has files and from is the file state the action being reversed
 // produced, edits made since then are carried over by a three-way merge.
 func (w *WS) restore(tx *store.Tx, s wsState, cur *store.Snapshot, curHash store.Hash, from *store.Hash) ([]string, error) {
-	t, err := tx.Task(w.Task)
-	if err != nil {
-		return nil, err
+	var t store.Task
+	if w.Task != 0 {
+		var err error
+		if t, err = tx.Task(w.Task); err != nil {
+			return nil, err
+		}
+		t.BaseTask, t.BaseVersion, t.BaseSnapshot, t.Conflicts = s.BaseTask, s.BaseVersion, s.BaseSnapshot, s.Conflicts
 	}
-	t.BaseTask, t.BaseVersion, t.BaseSnapshot, t.Conflicts = s.BaseTask, s.BaseVersion, s.BaseSnapshot, s.Conflicts
 	var notices []string
 	if s.Files != nil {
 		target, err := tx.Snapshot(*s.Files)
@@ -77,6 +104,9 @@ func (w *WS) restore(tx *store.Tx, s wsState, cur *store.Snapshot, curHash store
 			if err != nil {
 				return nil, err
 			}
+			if w.Task == 0 && len(res.Conflicts) > 0 {
+				return nil, conflictRefusal(res.Conflicts, "undoing this would conflict with edits made since")
+			}
 			target = res.Snapshot
 			t.Conflicts = append(t.Conflicts, res.Conflicts...)
 			notices = append(notices, res.Notices...)
@@ -87,6 +117,9 @@ func (w *WS) restore(tx *store.Tx, s wsState, cur *store.Snapshot, curHash store
 		if err := workspace.Apply(tx, w.ID, w.Root, cur, target, nil); err != nil {
 			return nil, err
 		}
+	}
+	if w.Task == 0 {
+		return notices, w.setBase(tx, s.BaseVersion, s.BaseSnapshot)
 	}
 	if err := tx.PutTask(&t); err != nil {
 		return nil, err
@@ -138,21 +171,18 @@ func (w *WS) Undo(ctx context.Context, saveID int64) (*UndoResult, error) {
 		if err != nil {
 			return err
 		}
-		t, err := tx.Task(w.Task)
+		now, err := w.state(tx)
 		if err != nil {
 			return err
 		}
-		now, err := captureState(tx, t)
-		if err != nil {
-			return err
-		}
+		task, folder := w.timeline()
 
 		if saveID != 0 {
 			var snap []byte
 			var at int64
-			err := tx.QueryRow("SELECT snapshot, at FROM save WHERE id = ? AND workspace = ?", saveID, w.ID).Scan(&snap, &at)
+			err := tx.QueryRow("SELECT snapshot, at FROM save WHERE id = ? AND task = ? AND workspace = ?", saveID, task, folder).Scan(&snap, &at)
 			if errors.Is(err, sql.ErrNoRows) {
-				return plyerr.New(plyerr.NotFound, "ply history", "no save %d in this workspace", saveID)
+				return plyerr.New(plyerr.NotFound, "ply history", "no save %d in %s's history", saveID, w.what())
 			}
 			if err != nil {
 				return err
@@ -165,10 +195,10 @@ func (w *WS) Undo(ctx context.Context, saveID int64) (*UndoResult, error) {
 			if _, _, err := w.catchUp(tx); err != nil {
 				return err
 			}
-			return recordAction(tx, w.ID, "goto", res.Did, withFiles(now, cur), target)
+			return recordAction(tx, w, "goto", res.Did, withFiles(now, cur), target)
 		}
 
-		id, a, err := loadAction(tx, "SELECT id, data FROM action WHERE workspace = ? AND undone = 0 AND kind != 'undo' ORDER BY id DESC LIMIT 1", w.ID)
+		id, a, err := loadAction(tx, "SELECT id, data FROM action WHERE task = ? AND workspace = ? AND undone = 0 AND kind != 'undo' ORDER BY id DESC LIMIT 1", task, folder)
 		if errors.Is(err, sql.ErrNoRows) {
 			return plyerr.New(plyerr.State, "", "nothing to undo")
 		}
@@ -189,20 +219,14 @@ func (w *WS) Undo(ctx context.Context, saveID int64) (*UndoResult, error) {
 			return err
 		}
 		res.Did = "undid " + a.Desc
-		after, err := tx.Task(w.Task)
-		if err != nil {
-			return err
-		}
-		afterState, err := captureState(tx, after)
+		afterState, err := w.state(tx)
 		if err != nil {
 			return err
 		}
 		if a.Before.Files != nil {
 			afterState.Files = a.Before.Files
 		}
-		b, _ := json.Marshal(actionData{Desc: a.Desc, Before: before, After: afterState, Undoes: id})
-		_, err = tx.Exec("INSERT INTO action (workspace, kind, data, at) VALUES (?, 'undo', ?, ?)", w.ID, string(b), time.Now().UnixMilli())
-		return err
+		return insertAction(tx, w, "undo", actionData{Desc: a.Desc, Before: before, After: afterState, Undoes: id})
 	})
 	return res, err
 }
@@ -216,9 +240,10 @@ func (w *WS) Redo(ctx context.Context) (*UndoResult, error) {
 		if err != nil {
 			return err
 		}
+		task, folder := w.timeline()
 		var lastAction int64
-		tx.QueryRow("SELECT coalesce(max(id), 0) FROM action WHERE workspace = ? AND kind != 'undo'", w.ID).Scan(&lastAction)
-		id, a, err := loadAction(tx, "SELECT id, data FROM action WHERE workspace = ? AND kind = 'undo' AND undone = 0 AND id > ? ORDER BY id DESC LIMIT 1", w.ID, lastAction)
+		tx.QueryRow("SELECT coalesce(max(id), 0) FROM action WHERE task = ? AND workspace = ? AND kind != 'undo'", task, folder).Scan(&lastAction)
+		id, a, err := loadAction(tx, "SELECT id, data FROM action WHERE task = ? AND workspace = ? AND kind = 'undo' AND undone = 0 AND id > ? ORDER BY id DESC LIMIT 1", task, folder, lastAction)
 		if errors.Is(err, sql.ErrNoRows) {
 			return plyerr.New(plyerr.State, "", "nothing to redo")
 		}
@@ -260,7 +285,8 @@ func (w *WS) History(ctx context.Context, limit int) ([]Event, error) {
 	}
 	var out []Event
 	err := w.DB.Read(ctx, func(tx *store.Tx) error {
-		rows, err := tx.Query("SELECT id, snapshot, at FROM save WHERE workspace = ? ORDER BY id DESC LIMIT ?", w.ID, limit+1)
+		task, folder := w.timeline()
+		rows, err := tx.Query("SELECT id, snapshot, at FROM save WHERE task = ? AND workspace = ? ORDER BY id DESC LIMIT ?", task, folder, limit+1)
 		if err != nil {
 			return err
 		}
@@ -295,11 +321,14 @@ func (w *WS) History(ctx context.Context, limit int) ([]Event, error) {
 					e.Desc = summarize(d)
 				}
 			} else {
-				e.Desc = "workspace created"
+				e.Desc = "first save"
 			}
 			out = append(out, e)
 		}
-		changes, err := tx.Changes(w.Task)
+		var changes []store.Change
+		if w.Task != 0 {
+			changes, err = tx.Changes(w.Task)
+		}
 		if err != nil {
 			return err
 		}
@@ -310,7 +339,7 @@ func (w *WS) History(ctx context.Context, limit int) ([]Event, error) {
 			}
 			out = append(out, Event{Kind: "change", ID: c.ID, At: c.UpdatedAt, Desc: desc, Hash: c.Snapshot})
 		}
-		arows, err := tx.Query("SELECT id, kind, data, at, undone FROM action WHERE workspace = ? AND kind NOT IN ('label', 'label-edit') ORDER BY id DESC LIMIT ?", w.ID, limit)
+		arows, err := tx.Query("SELECT id, kind, data, at, undone FROM action WHERE task = ? AND workspace = ? AND kind NOT IN ('label', 'label-edit') ORDER BY id DESC LIMIT ?", task, folder, limit)
 		if err != nil {
 			return err
 		}
@@ -343,4 +372,14 @@ func summarize(d []store.Delta) string {
 		return fmt.Sprintf("%s %s", d[0].Kind, d[0].Path)
 	}
 	return fmt.Sprintf("%s %s and %d more", d[0].Kind, d[0].Path, len(d)-1)
+}
+
+// conflictRefusal is the error for a project view whose edits would
+// conflict: it can't hold conflicts, so the edits belong in a task.
+func conflictRefusal(cs []store.Conflict, what string) error {
+	e := plyerr.New(plyerr.Conflict, `ply new "Title"`, "%s; this folder shows the project, so put your edits in a task first with", what)
+	for _, c := range cs {
+		e.Paths = append(e.Paths, c.Path)
+	}
+	return e
 }

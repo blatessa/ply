@@ -358,6 +358,11 @@ func (p *Project) Approve(ctx context.Context, actor string, id int64) ([]store.
 		if err != nil {
 			return notFound(err)
 		}
+		if who, err := tx.Setting(SettingApprove, ApproveAnyone); err != nil {
+			return err
+		} else if who == ApproveOthers && t.Owner == actor {
+			return plyerr.New(plyerr.Forbidden, "", "in this project someone other than the task's owner approves it")
+		}
 		// Collect the chain from the bottom up.
 		chain := []store.Task{t}
 		for b := t.BaseTask; b != 0; {
@@ -577,4 +582,46 @@ func (p *Project) Revert(ctx context.Context, actor string, id int64) (*TaskInfo
 		return err
 	})
 	return info, err
+}
+
+// Project settings.
+const (
+	// SettingApprove says who can approve a task: ApproveAnyone (the
+	// default), or ApproveOthers (anyone but the task's owner).
+	SettingApprove = "approve"
+	ApproveAnyone  = "anyone"
+	ApproveOthers  = "others"
+)
+
+var settings = map[string][]string{SettingApprove: {ApproveAnyone, ApproveOthers}}
+
+// Settings returns the project's settings, with defaults filled in.
+func (p *Project) Settings(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	err := p.DB.Read(ctx, func(tx *store.Tx) error {
+		for k, vals := range settings {
+			v, err := tx.Setting(k, vals[0])
+			if err != nil {
+				return err
+			}
+			out[k] = v
+		}
+		return nil
+	})
+	return out, err
+}
+
+// SetSetting changes a project setting.
+func (p *Project) SetSetting(ctx context.Context, key, value string) (map[string]string, error) {
+	vals, ok := settings[key]
+	if !ok {
+		return nil, plyerr.New(plyerr.Invalid, "ply setting", "there's no setting %q", key)
+	}
+	if !slices.Contains(vals, value) {
+		return nil, plyerr.New(plyerr.Invalid, "", "%s can be %s", key, strings.Join(vals, " or "))
+	}
+	if err := p.DB.Write(ctx, func(tx *store.Tx) error { return tx.SetSetting(key, value) }); err != nil {
+		return nil, err
+	}
+	return p.Settings(ctx)
 }

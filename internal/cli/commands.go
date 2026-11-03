@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,9 +42,12 @@ func (c *CLI) taskOrCurrent(a *Args, i int) (int64, error) {
 	}
 	w, err := c.ws()
 	if err != nil {
-		return 0, plyerr.New(plyerr.Invalid, "", "name a task, or run this inside its workspace")
+		return 0, plyerr.New(plyerr.Invalid, "", "name a task, or run this in a folder showing it")
 	}
 	defer w.Close()
+	if w.Task == 0 {
+		return 0, plyerr.New(plyerr.Invalid, "ply tasks", "this folder is showing the project, not a task; name a task")
+	}
 	return w.Task, nil
 }
 
@@ -58,7 +62,7 @@ func (c *CLI) proj(a *Args) (*local.Proj, error) {
 func init() {
 	register(&command{
 		name: "join", usage: "join <url> [--dir <folder>]", minPos: 1, maxPos: 1, valued: []string{"dir"},
-		summary: "Connect to a project on a server.\nWorkspaces are created in --dir (default: a folder named after the project, here).",
+		summary: "Connect to a project on a server and make its folder (--dir; default: a folder named after the project, here).\nThe folder shows the project; `ply new` starts a task in it.",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			e, err := c.env()
 			if err != nil {
@@ -74,26 +78,55 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			c.say("Joined %s as %s.\nWorkspaces go in %s. Start a task with `ply new \"Title\"`.", p.URL, e.Cfg.User, p.Dir)
+			local.EnsureWatcher()
+			c.say("Joined %s as %s.\nThe project's folder is %s. cd there and start a task with `ply new \"Title\"`.", p.URL, e.Cfg.User, p.Dir)
 			return p, nil
 		},
 	})
 	register(&command{
-		name: "new", usage: `new "<title>" [--on project|<task>] [--description <text>] [--copy-ignored] [--path <folder>]`,
-		minPos: 1, maxPos: 1, valued: []string{"on", "description", "path"}, bools: []string{"copy-ignored"},
-		summary: "Create a task and its workspace.\nInside a workspace, the new task builds on that workspace's task; elsewhere, on the project.",
+		name: "start", usage: "start <url>", minPos: 1, maxPos: 1,
+		summary: "Create a project on the server from this folder. Its files become a first task, \"Initial files\",\nlabeled and shared; approving it gives the project its starting files. This folder becomes the project's folder.",
+		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
+			e, err := c.env()
+			if err != nil {
+				return nil, err
+			}
+			r, err := e.Start(ctx, strings.TrimRight(a.Arg(0), "/"))
+			if err != nil {
+				return nil, err
+			}
+			local.EnsureWatcher()
+			c.say("Created project %s with task #%d %q (%d files), shared for review.", r.Project.URL, r.Task.ID, r.Task.Title, r.Files)
+			c.say("This folder is now the project's folder, showing task #%d. Run `ply approve` to make these the project's starting files.", r.Task.ID)
+			return r, nil
+		},
+	})
+	register(&command{
+		name: "new", usage: `new "<title>" [--on [<task>]] [--description <text>] [--separate] [--path <folder>]`,
+		minPos: 1, maxPos: 1, valued: []string{"description", "path"}, bools: []string{"separate"}, optional: []string{"on"},
+		summary: "Create a task and show it in this folder. It builds on the project; --on builds on the task this folder\nshows, --on <task> on any task. The task you leave keeps its unlabeled work; edits made while the folder\nshowed the project come along. --separate (or --path) makes an extra folder for it instead.",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			e, err := c.env()
 			if err != nil {
 				return nil, err
 			}
 			r, err := e.New(ctx, local.NewOptions{Title: a.Arg(0), Description: a.Str("description"), On: a.Str("on"),
-				CopyIgnored: a.Bool("copy-ignored"), Path: a.Str("path"), Project: a.Str("project")})
+				Separate: a.Bool("separate"), Path: a.Str("path"), Project: a.Str("project")})
 			if err != nil {
 				return nil, err
 			}
 			local.EnsureWatcher()
-			c.say("Created task #%d %q, built on %s.\nWorkspace: %s", r.Task.ID, r.Task.Title, r.BuiltOn, r.Path)
+			c.say("Created task #%d %q, built on %s.", r.Task.ID, r.Task.Title, r.BuiltOn)
+			if r.Path != c.Dir {
+				c.say("Folder: %s", r.Path)
+			}
+			if r.Carried > 0 {
+				c.say("  Your edits to %d files came along as unlabeled work.", r.Carried)
+			}
+			if len(r.Conflicts) > 0 {
+				c.say("  %d of them conflict with %s:", len(r.Conflicts), r.BuiltOn)
+				printConflicts(c, r.Conflicts)
+			}
 			if r.Warning != "" {
 				c.say("Note: %s", r.Warning)
 			}
@@ -101,19 +134,58 @@ func init() {
 		},
 	})
 	register(&command{
-		name: "get", usage: "get <task> [--path <folder>]", minPos: 1, maxPos: 1, valued: []string{"path"},
-		summary: "Make a workspace for an existing task, to review it closely or take it over.",
+		name: "switch", usage: "switch <task>|project [--separate] [--path <folder>]", minPos: 1, maxPos: 1,
+		valued: []string{"path"}, bools: []string{"separate"},
+		summary: "Show another task in this folder: yours or anyone's (or `project` for the project itself).\nThe task you leave keeps its unlabeled work, and coming back restores it. Ignored files stay put.\n--separate (or --path) makes an extra folder for the task instead, copying ignored files over.",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			e, err := c.env()
 			if err != nil {
 				return nil, err
 			}
-			r, err := e.Get(ctx, a.Arg(0), a.Str("path"), a.Str("project"))
+			r, err := e.Switch(ctx, a.Arg(0), local.SwitchOptions{Separate: a.Bool("separate"), Path: a.Str("path"), Project: a.Str("project")})
 			if err != nil {
 				return nil, err
 			}
 			local.EnsureWatcher()
-			c.say("Task #%d %q (%s), built on %s.\nWorkspace: %s", r.Task.ID, r.Task.Title, r.Task.Status, r.BuiltOn, r.Path)
+			if r.Task == nil {
+				c.say("Showing the project (#%d).", r.Project)
+			} else {
+				status := ""
+				if r.Task.Status != store.StatusOpen {
+					status = fmt.Sprintf(" (%s)", r.Task.Status)
+				}
+				c.say("Showing task #%d %q%s, built on %s.", r.Task.ID, r.Task.Title, status, r.BuiltOn)
+			}
+			if r.Restored {
+				c.say("  Your work on it is back as you left it.")
+			}
+			if r.Path != c.Dir {
+				c.say("Folder: %s", r.Path)
+			}
+			return r, nil
+		},
+	})
+	register(&command{
+		name: "ship", usage: `ship "<title>" [<file>...]`, minPos: 1, maxPos: -1,
+		summary: "Ship a small change straight to the project: wrap unlabeled work (all of it, or the files named)\ninto its own task and apply it, if the project lets you approve your own tasks; otherwise it's\nshared and marked ready for review. Your files aren't changed.",
+		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
+			w, err := c.ws()
+			if err != nil {
+				return nil, err
+			}
+			defer w.Close()
+			r, err := w.Ship(ctx, a.Arg(0), a.Pos[1:])
+			if err != nil {
+				return nil, err
+			}
+			if r.Applied != nil {
+				c.say("Shipped task #%d %q (%d files) as project #%d.", r.Task.ID, r.Task.Title, len(r.Files), r.Applied.Num)
+			} else {
+				c.say("Shared task #%d %q (%d files) and marked it ready for review: %s.", r.Task.ID, r.Task.Title, len(r.Files), r.NotApproved)
+			}
+			if r.LeftInTask != 0 {
+				c.say("  The edits are still unlabeled work on task #%d here; `ply refresh` drops them once they're in the project.", r.LeftInTask)
+			}
 			return r, nil
 		},
 	})
@@ -130,11 +202,15 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			status := st.Task.Status
-			if st.ServerStatus != "" {
-				status = st.ServerStatus
+			if st.Task.ID == 0 {
+				c.say("Showing the project (#%d). Start a task with `ply new \"Title\"`.", st.Project)
+			} else {
+				status := st.Task.Status
+				if st.ServerStatus != "" {
+					status = st.ServerStatus
+				}
+				c.say("Task #%d %q (%s), built on %s", st.Task.ID, st.Task.Title, status, st.BuiltOn)
 			}
-			c.say("Task #%d %q (%s), built on %s", st.Task.ID, st.Task.Title, status, st.BuiltOn)
 			if st.Server != "" {
 				c.say("  Couldn't check the server: %s", st.Server)
 			}
@@ -144,13 +220,32 @@ func init() {
 			if len(st.Conflicts) > 0 {
 				c.say("  %d unresolved conflicts (see `ply conflicts`).", len(st.Conflicts))
 			}
-			c.say("  %d labeled changes, %d not shared", st.Changes, st.Unshared)
-			if len(st.Unlabeled) == 0 {
+			if st.Task.ID != 0 {
+				c.say("  %d labeled changes, %d not shared", st.Changes, st.Unshared)
+			}
+			switch {
+			case len(st.Unlabeled) == 0 && st.Task.ID == 0:
+				c.say("  No edits.")
+			case len(st.Unlabeled) == 0:
 				c.say("  No unlabeled work.")
-			} else {
-				c.say("  Unlabeled work:")
+			default:
+				if st.Task.ID == 0 {
+					c.say("  Edits (they come along into your next `ply new`):")
+				} else {
+					c.say("  Unlabeled work:")
+				}
 				for _, d := range st.Unlabeled {
 					c.say("    %-8s %s", d.Kind, d.Path)
+				}
+			}
+			if len(st.Folders) > 0 {
+				c.say("  Other folders:")
+				for _, f := range st.Folders {
+					what := "the project"
+					if f.Task != 0 {
+						what = fmt.Sprintf("task #%d", f.Task)
+					}
+					c.say("    %s (%s)", f.Path, what)
 				}
 			}
 			return st, nil
@@ -489,14 +584,17 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			vs, err := e.Approve(ctx, strconv.FormatInt(id, 10), a.Str("project"))
+			r, err := e.Approve(ctx, strconv.FormatInt(id, 10), a.Str("project"))
 			if err != nil {
 				return nil, err
 			}
-			for _, v := range vs {
+			for _, v := range r.Versions {
 				c.say("Applied task #%d as project #%d.", v.Task, v.Num)
 			}
-			return map[string]any{"versions": vs}, nil
+			if r.ShowsProject != 0 {
+				c.say("This folder now shows the project (#%d).", r.ShowsProject)
+			}
+			return r, nil
 		},
 	})
 	register(&command{
@@ -544,7 +642,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			c.say("Created task #%d %q. Review it with `ply review %d`, or work on it with `ply get %d`.", info.ID, info.Title, info.ID, info.ID)
+			c.say("Created task #%d %q. Review it with `ply review %d`, or work on it with `ply switch %d`.", info.ID, info.Title, info.ID, info.ID)
 			if len(info.Conflicts) > 0 {
 				c.say("  It conflicts with later work in %d files; resolve them in its workspace.", len(info.Conflicts))
 			}
@@ -553,7 +651,7 @@ func init() {
 	})
 	register(&command{
 		name: "remove", usage: "remove [--force]", maxPos: 0, bools: []string{"force"},
-		summary: "Remove this task's workspace and its saves. Labeled changes that were shared stay with the task.",
+		summary: "Remove this extra folder (one made with --separate). The task's work stays on this machine;\n`ply switch <task>` in another folder picks it up again. The project's main folder can't be removed.",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			w, err := c.ws()
 			if err != nil {
@@ -563,7 +661,7 @@ func init() {
 			if err := w.Remove(ctx, a.Bool("force")); err != nil {
 				return nil, err
 			}
-			c.say("Removed the workspace for task #%d (%s).", w.Task, w.Root)
+			c.say("Removed the folder %s.", w.Root)
 			return map[string]any{"removed": w.Root}, nil
 		},
 	})
@@ -613,6 +711,38 @@ func init() {
 				c.say("#%-4d %s  task #%d %q, approved by %s", v.Num, v.AppliedAt.Local().Format("Jan 2 15:04"), v.Task, titles[v.Task], v.AppliedBy)
 			}
 			return map[string]any{"versions": vs}, nil
+		},
+	})
+	register(&command{
+		name: "setting", usage: "setting [<name> <value>]", maxPos: 2,
+		summary: "Show the project's settings, or change one.\napprove: who can approve a task, `anyone` (default) or `others` (anyone but its owner).",
+		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
+			if len(a.Pos) == 1 {
+				return nil, plyerr.New(plyerr.Invalid, "ply help setting", "give a setting and its value")
+			}
+			p, err := c.proj(a)
+			if err != nil {
+				return nil, err
+			}
+			defer p.Close()
+			var set map[string]string
+			if len(a.Pos) == 2 {
+				set, err = p.Client.SetSetting(ctx, a.Arg(0), a.Arg(1))
+			} else {
+				set, err = p.Client.Settings(ctx)
+			}
+			if err != nil {
+				return nil, err
+			}
+			keys := make([]string, 0, len(set))
+			for k := range set {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				c.say("%s = %s", k, set[k])
+			}
+			return set, nil
 		},
 	})
 	register(&command{

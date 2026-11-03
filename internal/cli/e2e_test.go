@@ -194,7 +194,6 @@ func TestConflictRefreshResolve(t *testing.T) {
 	a.ok("share")
 	a.ok("approve")
 
-	b.cd(filepath.Join(bhome, "bob-s-edit"))
 	b.fails("conflicts with project", "approve")
 	out := b.ok("refresh")
 	if !strings.Contains(out, "1 conflicts") {
@@ -253,7 +252,6 @@ func TestRefreshCarriesUnlabeledWork(t *testing.T) {
 	a.ok("share")
 	a.ok("approve")
 
-	b.cd(filepath.Join(bhome, "work"))
 	b.ok("refresh")
 	want := strings.Replace(strings.Replace(strings.Replace(lines, "one", "labeled", 1), "three", "unlabeled", 1), "eight", "theirs", 1)
 	if got := b.read("f.txt"); got != want {
@@ -293,8 +291,7 @@ func TestStaleShare(t *testing.T) {
 	a.ok("label", "alice 1")
 	a.ok("share")
 
-	b.ok("get", "2")
-	b.cd("shared-work")
+	b.ok("switch", "2")
 	b.write("f.txt", strings.Replace(strings.Replace(lines, "one", "alice", 1), "eight", "bob", 1))
 	b.ok("label", "bob 1")
 	b.ok("share")
@@ -331,32 +328,28 @@ func TestStackedTasks(t *testing.T) {
 	a.write("login.txt", "fixed\n")
 	a.ok("label", "fix")
 	a.ok("share")
-	login := a.cwd
 
 	// New task inside a workspace builds on that task.
 	var r struct {
 		Path    string `json:"path"`
 		BuiltOn string `json:"built_on"`
 	}
-	a.json(&r, "new", "Add password reset")
+	a.json(&r, "new", "Add password reset", "--on")
 	if r.BuiltOn != "task #2" {
 		t.Fatalf("built on %q", r.BuiltOn)
 	}
-	a.cd(r.Path)
 	if a.read("login.txt") != "fixed\n" {
 		t.Fatal("stacked task lacks the underlying task's files")
 	}
 	a.write("reset.txt", "reset\n")
 	a.ok("label", "reset")
 	a.ok("share")
-	reset := a.cwd
-
 	// More work underneath marks the top task as needing a refresh.
-	a.cd(login)
+	a.ok("switch", "2")
 	a.write("login.txt", "fixed better\n")
 	a.ok("label", "better")
 	a.ok("share")
-	a.cd(reset)
+	a.ok("switch", "3")
 	var st struct {
 		Refresh string `json:"refresh"`
 	}
@@ -404,7 +397,7 @@ func TestCloseTaskUnderneath(t *testing.T) {
 	a.write("bad.txt", "bad\n")
 	a.ok("label", "bad")
 	a.ok("share")
-	a.newTask("Good idea")
+	a.newTask("Good idea", "--on")
 	a.write("good.txt", "good\n")
 	a.ok("label", "good")
 	a.ok("share")
@@ -436,7 +429,7 @@ func TestUndoLabelAndGoBackToSave(t *testing.T) {
 	a.json(&info, "history")
 	var firstSave any
 	for _, e := range info {
-		if e.Kind == "save" && e.Desc == "workspace created" {
+		if e.Kind == "save" && e.Desc == "first save" {
 			firstSave = e.ID
 		}
 	}
@@ -485,7 +478,6 @@ func TestBinaryConflict(t *testing.T) {
 	a.ok("share")
 	a.ok("approve")
 
-	b.cd(filepath.Join(bhome, "bob-logo"))
 	b.ok("refresh")
 	if b.exists("logo.png") || !b.exists("logo (task #2).png") && !b.exists("logo (task 2).png") {
 		entries, _ := os.ReadDir(b.cwd)
@@ -530,7 +522,9 @@ func TestRevert(t *testing.T) {
 func TestErrorsNameTheFix(t *testing.T) {
 	w := newWorld(t)
 	a := w.person("alice")
-	a.fails("not in a workspace", "status")
+	a.cd("..")
+	a.fails("not in a project folder", "status")
+	a.cd("demo")
 	a.newTask("Something")
 	a.fails("ply label", "share")
 	out, _ := a.run("share", "--json")
@@ -544,23 +538,249 @@ func TestErrorsNameTheFix(t *testing.T) {
 	a.fails("unknown flag", "status", "--bogus")
 }
 
-func TestCopyIgnored(t *testing.T) {
+func TestSeparateFolderCopiesIgnored(t *testing.T) {
 	w := newWorld(t)
 	a := w.person("alice")
 	a.seed(map[string]string{"package.json": "{}\n"})
+	main := a.cwd
 	a.newTask("One")
 	a.write("node_modules/dep/index.js", "dep\n")
-	a.newTask("Two", "--copy-ignored", "--on", "project")
+	a.write("one.txt", "one\n")
+	a.newTask("Two", "--separate")
+	if a.cwd == main {
+		t.Fatal("--separate didn't make a new folder")
+	}
 	if a.read("node_modules/dep/index.js") != "dep\n" {
 		t.Fatal("ignored files weren't copied")
 	}
+	if a.exists("one.txt") {
+		t.Fatal("task One's work showed up in task Two's folder")
+	}
 	var st struct {
 		Unlabeled []any `json:"unlabeled"`
+		Folders   []struct {
+			Path string `json:"path"`
+			Task int64  `json:"task"`
+		} `json:"other_folders"`
 	}
 	a.json(&st, "status")
 	if len(st.Unlabeled) != 0 {
 		t.Fatalf("ignored files show as work: %v", st.Unlabeled)
 	}
+	if len(st.Folders) != 1 || st.Folders[0].Path != main || st.Folders[0].Task != 2 {
+		t.Fatalf("other folders: %+v", st.Folders)
+	}
+	// A task can only show in one folder at a time.
+	a.fails("showing in another folder", "switch", "2")
+	// Removing the extra folder keeps the task's work: show it in the main
+	// folder.
+	a.write("two.txt", "two\n")
+	extra := a.cwd
+	a.ok("remove")
+	if _, err := os.Stat(extra); err == nil {
+		t.Fatal("folder still exists")
+	}
+	a.cd(main)
+	a.fails("main folder", "remove")
+	a.ok("switch", "3")
+	if a.read("two.txt") != "two\n" || a.exists("one.txt") {
+		t.Fatalf("after switching: two=%q one=%v", a.read("two.txt"), a.exists("one.txt"))
+	}
+	if a.read("node_modules/dep/index.js") != "dep\n" {
+		t.Fatal("switching touched ignored files")
+	}
+}
+
+func TestSwitchKeepsWork(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.person("alice"), w.person("bob")
+	a.seed(map[string]string{"f.txt": lines})
+	a.newTask("First")
+	a.write("f.txt", "first labeled\n")
+	a.ok("label", "first")
+	a.write("f.txt", "first unlabeled\n")
+	a.write("new.txt", "new\n")
+	a.write("node_modules/x.js", "x\n")
+
+	// A new task starts from the project; First's work stays with First.
+	a.newTask("Second")
+	if a.read("f.txt") != lines || a.exists("new.txt") {
+		t.Fatalf("second task shows first's work: %q new=%v", a.read("f.txt"), a.exists("new.txt"))
+	}
+	if a.read("node_modules/x.js") != "x\n" {
+		t.Fatal("ignored files were touched")
+	}
+	a.write("f.txt", "second\n")
+
+	var r struct {
+		Restored bool `json:"restored_work"`
+	}
+	a.json(&r, "switch", "2")
+	if !r.Restored || a.read("f.txt") != "first unlabeled\n" || a.read("new.txt") != "new\n" {
+		t.Fatalf("switch back: restored=%v f=%q", r.Restored, a.read("f.txt"))
+	}
+	// Undo history belongs to the task too.
+	a.ok("undo")
+	a.fails("no change to edit", "label", "--edit")
+	a.ok("redo")
+	a.ok("share")
+	a.ok("switch", "3")
+	if a.read("f.txt") != "second\n" {
+		t.Fatalf("second task's work: %q", a.read("f.txt"))
+	}
+
+	// Anyone's task: Bob looks at Alice's shared task, then goes back to
+	// the project.
+	b.ok("switch", "2")
+	if b.read("f.txt") != "first labeled\n" {
+		t.Fatalf("bob sees %q", b.read("f.txt"))
+	}
+	b.ok("switch", "project")
+	if b.read("f.txt") != lines {
+		t.Fatalf("project view: %q", b.read("f.txt"))
+	}
+	b.fails("showing the project", "label", "x")
+}
+
+func TestProjectViewEditsComeAlong(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.person("alice"), w.person("bob")
+	a.seed(map[string]string{"f.txt": lines})
+	// Bob joined before the seed: his folder shows project #0.
+	var st struct {
+		Project   int64 `json:"project"`
+		Refresh   string
+		Unlabeled []struct{ Path string } `json:"unlabeled"`
+	}
+	b.json(&st, "status")
+	if st.Refresh == "" {
+		t.Fatalf("project view should need a refresh: %+v", st)
+	}
+	b.ok("refresh")
+	if b.read("f.txt") != lines {
+		t.Fatal("refresh didn't bring the project's files")
+	}
+	b.write("f.txt", strings.Replace(lines, "one", "bob", 1))
+	b.json(&st, "status")
+	if len(st.Unlabeled) != 1 {
+		t.Fatalf("edits: %+v", st)
+	}
+	// The project moves on underneath; the edits still come along.
+	a.newTask("Bottom")
+	a.write("f.txt", strings.Replace(lines, "eight", "alice", 1))
+	a.ok("label", "bottom")
+	a.ok("share")
+	a.ok("approve")
+
+	var r struct {
+		Carried int `json:"carried_files"`
+	}
+	b.json(&r, "new", "Bob's idea")
+	if r.Carried != 1 {
+		t.Fatalf("carried %d", r.Carried)
+	}
+	if got, want := b.read("f.txt"), strings.Replace(strings.Replace(lines, "one", "bob", 1), "eight", "alice", 1); got != want {
+		t.Fatalf("carried edits:\n%s\nwant\n%s", got, want)
+	}
+	b.ok("label", "idea")
+	b.ok("share")
+	// Going back to the project: the edits moved into the task.
+	b.ok("switch", "project")
+	if b.read("f.txt") != strings.Replace(lines, "eight", "alice", 1) {
+		t.Fatalf("project view after new: %q", b.read("f.txt"))
+	}
+}
+
+func TestStart(t *testing.T) {
+	w := newWorld(t)
+	a := &person{w: w, name: "alice", cwd: filepath.Join(w.dir, "my-app")}
+	a.write("main.go", "package main\n")
+	a.write("docs/readme.md", "hi\n")
+	a.write("node_modules/dep.js", "ignored\n")
+	var r struct {
+		Task struct {
+			ID     int64  `json:"id"`
+			Title  string `json:"title"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Files int `json:"files"`
+	}
+	a.json(&r, "start", w.url+"/my-app")
+	if r.Files != 2 || r.Task.Title != "Initial files" {
+		t.Fatalf("start: %+v", r)
+	}
+	a.fails("already a Ply folder", "start", w.url+"/other")
+	a.ok("approve")
+	// Someone else joins and gets the files.
+	b := &person{w: w, name: "bob", cwd: filepath.Join(w.dir, "bob")}
+	os.MkdirAll(b.cwd, 0o755)
+	b.ok("join", w.url+"/my-app")
+	b.cd("my-app")
+	if b.read("main.go") != "package main\n" || b.read("docs/readme.md") != "hi\n" || b.exists("node_modules/dep.js") {
+		t.Fatal("joined project lacks the starting files")
+	}
+	// Starting an existing project with work refuses.
+	c := &person{w: w, name: "carol", cwd: filepath.Join(w.dir, "carol")}
+	c.write("x", "x\n")
+	c.fails("ply join", "start", w.url+"/my-app")
+}
+
+func TestShip(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.person("alice"), w.person("bob")
+	a.seed(map[string]string{"f.txt": lines, "g.txt": "g\n"})
+
+	// From a task with its own work: ship just the typo fix.
+	a.newTask("Big feature")
+	a.write("feature.txt", "feature\n")
+	a.ok("label", "feature")
+	a.write("g.txt", "g fixed\n")
+	a.write("wip.txt", "wip\n")
+	var r struct {
+		Task struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		} `json:"task"`
+		Applied *struct{ Num int64 } `json:"applied"`
+	}
+	a.json(&r, "ship", "Fix typo in g", "g.txt")
+	if r.Applied == nil || r.Applied.Num != 2 || r.Task.Status != "applied" {
+		t.Fatalf("ship: %+v", r)
+	}
+	a.ok("export", filepath.Join(w.dir, "out"))
+	if got, _ := os.ReadFile(filepath.Join(w.dir, "out", "g.txt")); string(got) != "g fixed\n" {
+		t.Fatalf("g.txt = %q", got)
+	}
+	for _, f := range []string{"feature.txt", "wip.txt"} {
+		if _, err := os.Stat(filepath.Join(w.dir, "out", f)); err == nil {
+			t.Fatalf("%s shipped too", f)
+		}
+	}
+	// Files weren't touched; after a refresh the fix is no longer unlabeled.
+	if a.read("g.txt") != "g fixed\n" || a.read("wip.txt") != "wip\n" {
+		t.Fatal("ship changed files")
+	}
+	a.ok("refresh")
+	var st struct {
+		Unlabeled []struct{ Path string } `json:"unlabeled"`
+	}
+	a.json(&st, "status")
+	if len(st.Unlabeled) != 1 || st.Unlabeled[0].Path != "wip.txt" {
+		t.Fatalf("unlabeled after refresh: %+v", st.Unlabeled)
+	}
+
+	// From the project view, with self-approval turned off: left ready.
+	b.ok("refresh")
+	b.write("f.txt", strings.Replace(lines, "one", "1", 1))
+	b.ok("setting", "approve", "others")
+	r.Applied = nil
+	b.json(&r, "ship", "Number one")
+	if r.Applied != nil || r.Task.Status != "ready" {
+		t.Fatalf("ship without self-approval: %+v", r)
+	}
+	b.fails("other than the task's owner", "approve", jsonNum(r.Task.ID))
+	a.ok("approve", jsonNum(r.Task.ID))
+	b.fails("none of those files", "ship", "Again", "g.txt")
 }
 
 func TestNotesAndStatuses(t *testing.T) {
@@ -605,10 +825,12 @@ func TestNotesAndStatuses(t *testing.T) {
 	if !strings.Contains(out, "Feature") {
 		t.Fatalf("tasks:\n%s", out)
 	}
-	a.ok("approve")
-	a.fails("already applied", "close")
-	a.ok("remove")
-	if _, err := os.Stat(a.cwd); err == nil {
-		t.Fatal("workspace folder still exists")
+	var ap struct {
+		ShowsProject int64 `json:"folder_shows_project"`
 	}
+	a.json(&ap, "approve")
+	if ap.ShowsProject != 2 {
+		t.Fatalf("after approving, folder shows project %d", ap.ShowsProject)
+	}
+	a.fails("already applied", "close", "2")
 }
