@@ -395,7 +395,7 @@ func (e *Env) Approve(ctx context.Context, ref, projectName string) (*ApproveRes
 					t.Status = store.StatusApplied
 					tx.PutTask(&t)
 				}
-				if err := w.show(tx, cur, tg); err != nil {
+				if _, err := w.show(tx, cur, h, tg); err != nil {
 					return err
 				}
 				res.ShowsProject = w.BaseVersion

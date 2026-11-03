@@ -102,24 +102,22 @@ func init() {
 		},
 	})
 	register(&command{
-		name: "new", usage: `new "<title>" [--on [<task>]] [--description <text>] [--separate] [--path <folder>]`,
-		minPos: 1, maxPos: 1, valued: []string{"description", "path"}, bools: []string{"separate"}, optional: []string{"on"},
-		summary: "Create a task and show it in this folder. It builds on the project; --on builds on the task this folder\nshows, --on <task> on any task. The task you leave keeps its unlabeled work; edits made while the folder\nshowed the project come along. --separate (or --path) makes an extra folder for it instead.",
+		name: "new", usage: `new "<title>" [--on [<task>]] [--description <text>] [--separate | --here] [--path <folder>]`,
+		minPos: 1, maxPos: 1, valued: []string{"description", "path"}, bools: []string{"separate", "here"}, optional: []string{"on"},
+		summary: "Create a task and show it in this folder. It builds on the project; --on builds on the task this folder\nshows, --on <task> on any task. The task you leave keeps its unlabeled work; edits made while the folder\nshowed the project come along. --separate (or --path) makes an extra folder for it instead.\nRun by an agent (PLY_AGENT or CLAUDECODE set) in the project's main folder, it makes an extra folder\nunless given --here, so it doesn't change files under a person.",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			e, err := c.env()
 			if err != nil {
 				return nil, err
 			}
 			r, err := e.New(ctx, local.NewOptions{Title: a.Arg(0), Description: a.Str("description"), On: a.Str("on"),
-				Separate: a.Bool("separate"), Path: a.Str("path"), Project: a.Str("project")})
+				Separate: a.Bool("separate"), Here: a.Bool("here"), Path: a.Str("path"), Project: a.Str("project")})
 			if err != nil {
 				return nil, err
 			}
 			local.EnsureWatcher()
 			c.say("Created task #%d %q, built on %s.", r.Task.ID, r.Task.Title, r.BuiltOn)
-			if r.Path != c.Dir {
-				c.say("Folder: %s", r.Path)
-			}
+			sayFolder(c, r.Path, r.Separate, r.Rewrote)
 			if r.Carried > 0 {
 				c.say("  Your edits to %d files came along as unlabeled work.", r.Carried)
 			}
@@ -134,15 +132,15 @@ func init() {
 		},
 	})
 	register(&command{
-		name: "switch", usage: "switch <task>|project [--separate] [--path <folder>]", minPos: 1, maxPos: 1,
-		valued: []string{"path"}, bools: []string{"separate"},
-		summary: "Show another task in this folder: yours or anyone's (or `project` for the project itself).\nThe task you leave keeps its unlabeled work, and coming back restores it. Ignored files stay put.\n--separate (or --path) makes an extra folder for the task instead, copying ignored files over.",
+		name: "switch", usage: "switch <task>|project [--separate | --here] [--path <folder>]", minPos: 1, maxPos: 1,
+		valued: []string{"path"}, bools: []string{"separate", "here"},
+		summary: "Show another task in this folder: yours or anyone's (or `project` for the project itself).\nThe task you leave keeps its unlabeled work, and coming back restores it. Ignored files stay put.\n--separate (or --path) makes an extra folder for the task instead, copying ignored files over.\nAgents get an extra folder by default when run in the project's main folder (see `ply help new`).",
 		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
 			e, err := c.env()
 			if err != nil {
 				return nil, err
 			}
-			r, err := e.Switch(ctx, a.Arg(0), local.SwitchOptions{Separate: a.Bool("separate"), Path: a.Str("path"), Project: a.Str("project")})
+			r, err := e.Switch(ctx, a.Arg(0), local.SwitchOptions{Separate: a.Bool("separate"), Here: a.Bool("here"), Path: a.Str("path"), Project: a.Str("project")})
 			if err != nil {
 				return nil, err
 			}
@@ -159,9 +157,7 @@ func init() {
 			if r.Restored {
 				c.say("  Your work on it is back as you left it.")
 			}
-			if r.Path != c.Dir {
-				c.say("Folder: %s", r.Path)
-			}
+			sayFolder(c, r.Path, r.Separate, r.Rewrote)
 			return r, nil
 		},
 	})
@@ -238,6 +234,7 @@ func init() {
 					c.say("    %-8s %s", d.Kind, d.Path)
 				}
 			}
+			sayStale(c, st.Stale)
 			if len(st.Folders) > 0 {
 				c.say("  Other folders:")
 				for _, f := range st.Folders {
@@ -306,6 +303,9 @@ func init() {
 				c.say("Updated change %q. Run `ply share` to share it.", ch.Label)
 			} else {
 				c.say("Labeled change %q. Run `ply share` to share it.", ch.Label)
+			}
+			if stale, _ := w.StaleWrites(ctx); len(stale) > 0 {
+				sayStale(c, stale)
 			}
 			return ch, nil
 		},
@@ -405,6 +405,9 @@ func init() {
 				return nil, err
 			}
 			c.say("Shared %d changes to task #%d.", r.Shared, r.Task.ID)
+			if stale, _ := w.StaleWrites(ctx); len(stale) > 0 {
+				sayStale(c, stale)
+			}
 			if r.Unlabeled > 0 {
 				c.say("  %d files have unlabeled work, which wasn't shared.", r.Unlabeled)
 			}
@@ -822,6 +825,35 @@ func builtOnInfo(t *project.TaskInfo) string {
 		return fmt.Sprintf("task #%d", t.BaseTask)
 	}
 	return fmt.Sprintf("project #%d", t.BaseVersion)
+}
+
+// sayFolder reports where a task is shown and reminds people to reload
+// files their editor has open.
+func sayFolder(c *CLI, path, separate string, rewrote int) {
+	if separate != "" {
+		c.say("Made a separate folder: %s.", separate)
+	}
+	if path != c.Dir {
+		c.say("Folder: %s", path)
+	} else if rewrote > 0 {
+		c.say("  Changed %d files here; reload any your editor has open, or it may save the old versions back.", rewrote)
+	}
+}
+
+// sayStale warns about files that look like an editor saved them from
+// before the last switch.
+func sayStale(c *CLI, stale []local.StaleWrite) {
+	if len(stale) == 0 {
+		return
+	}
+	c.say("  Warning: these files were saved with the version from before the last switch, probably by an editor\n  that still had them open. Reload them in your editor; if the old version shouldn't be here, put\n  back the earlier save with `ply undo <save>` (see `ply history`):")
+	for _, s := range stale {
+		from := "the project"
+		if s.From != 0 {
+			from = fmt.Sprintf("task #%d", s.From)
+		}
+		c.say("    %s (%s's version; save before it: %d)", s.Path, from, s.Save)
+	}
 }
 
 func printConflicts(c *CLI, cs []store.Conflict) {

@@ -262,32 +262,43 @@ func (tg *target) files(tx *store.Tx, w *WS) (store.Hash, error) {
 
 // show switches the folder to the target, writing only the files that
 // differ. The folder's current work is already saved to its own timeline.
-func (w *WS) show(tx *store.Tx, cur *store.Snapshot, tg *target) error {
-	task := tg.task
-	w.Task = task
+// It returns how many files it rewrote.
+func (w *WS) show(tx *store.Tx, cur *store.Snapshot, curH store.Hash, tg *target) (int, error) {
+	prevTask := w.Task
+	w.Task = tg.task
 	files, err := tg.files(tx, w)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	return w.rewrite(tx, cur, curH, files, prevTask, workspace.LoadDonors)
+}
+
+// rewrite changes the folder's files from cur to files after a switch from
+// prevTask, and records the switch.
+func (w *WS) rewrite(tx *store.Tx, cur *store.Snapshot, curH, files store.Hash, prevTask int64, donors func(*store.Tx) (workspace.Donors, error)) (int, error) {
 	snap, err := tx.Snapshot(files)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	donors, err := workspace.LoadDonors(tx)
+	d, err := donors(tx)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := workspace.Apply(tx, w.ID, w.Root, cur, snap, donors); err != nil {
-		return err
+	n := len(store.Diff(cur, snap))
+	if err := workspace.Apply(tx, w.ID, w.Root, cur, snap, d); err != nil {
+		return 0, err
 	}
-	if _, err := tx.Exec("UPDATE workspace SET task = ? WHERE id = ?", task, w.ID); err != nil {
-		return err
+	if _, err := tx.Exec("UPDATE workspace SET task = ? WHERE id = ?", w.Task, w.ID); err != nil {
+		return 0, err
+	}
+	if err := w.noteSwitch(tx, prevTask, curH, files); err != nil {
+		return 0, err
 	}
 	if err := w.writeMarker(); err != nil {
-		return err
+		return 0, err
 	}
 	_, _, err = w.catchUp(tx)
-	return err
+	return n, err
 }
 
 // SwitchResult says what a folder now shows.
@@ -297,15 +308,47 @@ type SwitchResult struct {
 	Path    string      `json:"path"`
 	BuiltOn string      `json:"built_on,omitempty"`
 	// Restored is set when the folder came back to work this machine had.
-	Restored bool   `json:"restored_work"`
+	Restored bool `json:"restored_work"`
+	// Rewrote counts the files the switch changed in the folder.
+	Rewrote int `json:"files_rewritten"`
+	// Separate says why an extra folder was made without --separate.
+	Separate string `json:"separate_because,omitempty"`
 	Warning  string `json:"warning,omitempty"`
 }
 
 // SwitchOptions configure a switch.
 type SwitchOptions struct {
 	Separate bool
+	Here     bool   // use this folder even when running as an agent
 	Path     string // with Separate: where to make the folder
 	Project  string
+}
+
+// Agent returns the environment variable saying Ply is being run by an
+// agent, if any: PLY_AGENT, or one an agent sets itself (Claude Code sets
+// CLAUDECODE).
+func Agent() string {
+	for _, k := range []string{"PLY_AGENT", "CLAUDECODE"} {
+		switch os.Getenv(k) {
+		case "", "0", "false", "no":
+		default:
+			return k
+		}
+	}
+	return ""
+}
+
+// agentSeparate says why an agent gets its own folder: run in the project's
+// main folder (which a person is likely using), new and switch make an extra
+// folder instead of changing files under them. --here opts out.
+func agentSeparate(cur *WS, here bool) string {
+	if here || cur == nil || !cur.Main {
+		return ""
+	}
+	if k := Agent(); k != "" {
+		return "running as an agent (" + k + " is set), so the project's main folder is left alone; use --here to use it"
+	}
+	return ""
 }
 
 // Switch makes the current folder show another task (or "project"), or with
@@ -320,10 +363,18 @@ func (e *Env) Switch(ctx context.Context, ref string, o SwitchOptions) (*SwitchR
 		task = id
 	}
 	cur, curErr := e.Workspace()
+	if curErr != nil {
+		cur = nil
+	}
 	separate := o.Separate || o.Path != ""
+	because := ""
+	if !separate {
+		because = agentSeparate(cur, o.Here)
+		separate = because != ""
+	}
 	var p *Proj
 	switch {
-	case curErr == nil:
+	case cur != nil:
 		p = cur.Proj
 	case separate:
 		var err error
@@ -371,21 +422,28 @@ func (e *Env) Switch(ctx context.Context, ref string, o SwitchOptions) (*SwitchR
 		if w, err = p.separate(ctx, tg, o.Path, title, from); err != nil {
 			return nil, err
 		}
-	} else {
+	}
+	rewrote := 0
+	if !separate {
 		w = cur
 		err = w.DB.Write(ctx, func(tx *store.Tx) error {
-			curSnap, _, err := w.catchUp(tx)
+			curSnap, curH, err := w.catchUp(tx)
 			if err != nil {
 				return err
 			}
-			return w.show(tx, curSnap, tg)
+			rewrote, err = w.show(tx, curSnap, curH, tg)
+			return err
 		})
 		if err != nil {
 			return nil, err
 		}
 	}
 	p.prune(ctx)
-	return w.switchResult(ctx, restored)
+	r, err := w.switchResult(ctx, restored)
+	if r != nil {
+		r.Rewrote, r.Separate = rewrote, because
+	}
+	return r, err
 }
 
 func (w *WS) switchResult(ctx context.Context, restored bool) (*SwitchResult, error) {
@@ -454,6 +512,8 @@ type NewResult struct {
 	// Carried is set when edits made in a folder showing the project came
 	// along into the task.
 	Carried   int              `json:"carried_files,omitempty"`
+	Rewrote   int              `json:"files_rewritten"`
+	Separate  string           `json:"separate_because,omitempty"`
 	Conflicts []store.Conflict `json:"conflicts,omitempty"`
 	Warning   string           `json:"warning,omitempty"`
 }
@@ -466,6 +526,7 @@ type NewOptions struct {
 	// is showing, or a task reference.
 	On       string
 	Separate bool
+	Here     bool   // use this folder even when running as an agent
 	Path     string // implies Separate
 	Project  string
 }
@@ -475,10 +536,18 @@ type NewOptions struct {
 // along; a task's unlabeled work stays with that task.
 func (e *Env) New(ctx context.Context, o NewOptions) (*NewResult, error) {
 	cur, curErr := e.Workspace()
+	if curErr != nil {
+		cur = nil
+	}
 	separate := o.Separate || o.Path != ""
+	var because string
+	if !separate {
+		because = agentSeparate(cur, o.Here)
+		separate = because != ""
+	}
 	var p *Proj
 	switch {
-	case curErr == nil:
+	case cur != nil:
 		p = cur.Proj
 	case separate:
 		var err error
@@ -518,7 +587,7 @@ func (e *Env) New(ctx context.Context, o NewOptions) (*NewResult, error) {
 	if err := p.Client.Fetch(ctx, p.DB, []store.Hash{info.Latest, info.BaseSnapshot}, p.haveSnapshots(ctx)); err != nil {
 		return nil, err
 	}
-	res := &NewResult{Task: *info, BuiltOn: builtOn(info.Task), Warning: warning}
+	res := &NewResult{Task: *info, BuiltOn: builtOn(info.Task), Warning: warning, Separate: because}
 	tg := &target{task: info.ID, info: info}
 	var w *WS
 	if separate {
@@ -539,7 +608,8 @@ func (e *Env) New(ctx context.Context, o NewOptions) (*NewResult, error) {
 				return err
 			}
 			if w.Task != 0 || curH == w.BaseSnapshot {
-				return w.show(tx, curSnap, tg)
+				res.Rewrote, err = w.show(tx, curSnap, curH, tg)
+				return err
 			}
 			return w.carryInto(tx, curSnap, curH, tg, res)
 		})
@@ -593,23 +663,12 @@ func (w *WS) carryInto(tx *store.Tx, curSnap *store.Snapshot, curH store.Hash, t
 			return err
 		}
 	}
-	target, err := tx.Snapshot(files)
-	if err != nil {
-		return err
-	}
-	if err := workspace.Apply(tx, w.ID, w.Root, curSnap, target, nil); err != nil {
-		return err
-	}
 	w.Task = info.ID
-	if _, err := tx.Exec("UPDATE workspace SET task = ? WHERE id = ?", w.Task, w.ID); err != nil {
-		return err
-	}
-	if err := w.writeMarker(); err != nil {
-		return err
-	}
-	_, _, err = w.catchUp(tx)
+	res.Rewrote, err = w.rewrite(tx, curSnap, curH, files, 0, noDonors)
 	return err
 }
+
+func noDonors(*store.Tx) (workspace.Donors, error) { return nil, nil }
 
 // Remove deletes an extra folder. The task's work stays on this machine:
 // switch to the task in another folder to pick it up again.

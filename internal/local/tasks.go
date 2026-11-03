@@ -50,10 +50,13 @@ func (p *Proj) haveSnapshots(ctx context.Context) []store.Hash {
 type Status struct {
 	// Task is the task the folder shows; its ID is 0 when the folder shows
 	// the project itself (Project is then the version).
-	Task      store.Task       `json:"task"`
-	Project   int64            `json:"project,omitempty"`
-	Path      string           `json:"path"`
-	Folders   []Folder         `json:"other_folders,omitempty"`
+	Task    store.Task `json:"task"`
+	Project int64      `json:"project,omitempty"`
+	Path    string     `json:"path"`
+	Folders []Folder   `json:"other_folders,omitempty"`
+	// Stale lists files probably saved by an editor from before the last
+	// switch.
+	Stale     []StaleWrite     `json:"stale_writes,omitempty"`
 	BuiltOn   string           `json:"built_on"`
 	Unlabeled []store.Delta    `json:"unlabeled"`
 	Unshared  int              `json:"unshared_changes"`
@@ -76,6 +79,9 @@ func (w *WS) Status(ctx context.Context) (*Status, error) {
 	}
 	st := &Status{Path: w.Root}
 	if st.Folders, err = w.otherFolders(ctx); err != nil {
+		return nil, err
+	}
+	if st.Stale, err = w.StaleWrites(ctx); err != nil {
 		return nil, err
 	}
 	if w.Task == 0 {

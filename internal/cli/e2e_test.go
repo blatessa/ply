@@ -38,9 +38,10 @@ func newWorld(t *testing.T) *world {
 }
 
 type person struct {
-	w    *world
-	name string
-	cwd  string
+	w     *world
+	name  string
+	cwd   string
+	agent string // PLY_AGENT
 }
 
 func (w *world) person(name string) *person {
@@ -65,6 +66,8 @@ func (p *person) run(args ...string) (string, int) {
 	os.Setenv("PLY_HOME", filepath.Join(p.w.dir, "home-"+p.name))
 	os.Setenv("PLY_USER", p.name)
 	os.Setenv("PLY_NO_WATCH", "1")
+	os.Setenv("PLY_AGENT", p.agent)
+	os.Setenv("CLAUDECODE", "")
 	var out bytes.Buffer
 	c := &cli.CLI{Out: &out, Err: &out, Dir: p.cwd}
 	code := c.Run(context.Background(), args)
@@ -833,4 +836,77 @@ func TestNotesAndStatuses(t *testing.T) {
 		t.Fatalf("after approving, folder shows project %d", ap.ShowsProject)
 	}
 	a.fails("already applied", "close", "2")
+}
+
+func TestAgentGetsItsOwnFolder(t *testing.T) {
+	w := newWorld(t)
+	a := w.person("alice")
+	a.seed(map[string]string{"f.txt": lines})
+	main := a.cwd
+	a.write("f.txt", "alice is editing\n")
+
+	a.agent = "1"
+	var r struct {
+		Path     string `json:"path"`
+		Separate string `json:"separate_because"`
+	}
+	a.json(&r, "new", "Agent work")
+	if r.Path == main || !strings.Contains(r.Separate, "agent") {
+		t.Fatalf("agent's task went in the main folder: %+v", r)
+	}
+	if got, _ := os.ReadFile(filepath.Join(main, "f.txt")); string(got) != "alice is editing\n" {
+		t.Fatalf("main folder changed under alice: %q", got)
+	}
+	// In its own folder, the agent works in place.
+	a.cd(r.Path)
+	r.Separate = ""
+	a.json(&r, "new", "More agent work")
+	if r.Path != a.cwd || r.Separate != "" {
+		t.Fatalf("agent's second task: %+v", r)
+	}
+	// --here uses the main folder anyway.
+	a.cd(main)
+	a.json(&r, "new", "Here", "--here")
+	if r.Path != main {
+		t.Fatalf("--here: %+v", r)
+	}
+}
+
+func TestStaleEditorWrites(t *testing.T) {
+	w := newWorld(t)
+	a := w.person("alice")
+	a.seed(map[string]string{"f.txt": lines, "g.txt": "g\n"})
+	a.newTask("A")
+	a.write("f.txt", "A's version\n")
+	a.write("a-only.txt", "A's file\n")
+	a.newTask("B")
+	a.write("g.txt", "B's edit\n")
+	var st struct {
+		Stale []struct {
+			Path string `json:"path"`
+			From int64  `json:"from_task"`
+		} `json:"stale_writes"`
+	}
+	a.json(&st, "status")
+	if len(st.Stale) != 0 {
+		t.Fatalf("ordinary edit flagged: %+v", st.Stale)
+	}
+	// An editor saves its open buffers from before the switch.
+	a.write("f.txt", "A's version\n")
+	a.write("a-only.txt", "A's file\n")
+	a.json(&st, "status")
+	if len(st.Stale) != 2 || st.Stale[0].From != 2 {
+		t.Fatalf("stale writes: %+v", st.Stale)
+	}
+	if out := a.ok("label", "B work"); !strings.Contains(out, "Warning") || !strings.Contains(out, "f.txt") {
+		t.Fatalf("label didn't warn:\n%s", out)
+	}
+	// Fixing the file clears it.
+	a.write("f.txt", lines)
+	os.Remove(filepath.Join(a.cwd, "a-only.txt"))
+	st.Stale = nil
+	a.json(&st, "status")
+	if len(st.Stale) != 0 {
+		t.Fatalf("stale writes not cleared: %+v", st.Stale)
+	}
 }

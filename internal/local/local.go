@@ -244,6 +244,9 @@ func (w *WS) catchUp(tx *store.Tx) (*store.Snapshot, store.Hash, error) {
 			}
 		}
 	}
+	if err := w.checkStale(tx, snap); err != nil {
+		return nil, store.Hash{}, err
+	}
 	h, err := tx.PutSnapshot(snap)
 	if err != nil {
 		return nil, h, err

@@ -28,8 +28,15 @@ For a small fix, ply ship "Fix typo" [files...] wraps unlabeled work into its ow
 - ply undo          undo the last action; ply history + ply undo <save> to go back to any save
 - ply tasks         list tasks; ply switch <task> shows one in this folder (ply switch project: the project)
 - ply new "..." --on               build on the task this folder shows (--on <task>: any task)
-- ply new "..." --separate         an extra folder (ignored files like node_modules are copied over),
-                                   for working in parallel with another agent; ply remove deletes it
+- ply new "..." --separate         an extra folder (ignored files like node_modules are copied over);
+                                   ply remove deletes it
+
+## Agents
+
+Run in the project's main folder, ply new and ply switch give you your own folder
+(so a person's files don't change under them) and print its path: cd there and work.
+This happens when PLY_AGENT or CLAUDECODE is set; set PLY_AGENT=1 if your agent sets
+neither. Pass --here only if you're told to work in the main folder.
 
 ## Rules
 

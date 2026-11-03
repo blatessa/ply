@@ -166,4 +166,12 @@ DROP TABLE action;
 ALTER TABLE action3 RENAME TO action;
 CREATE INDEX action_timeline ON action(task, workspace, id);
 `,
+	// 4: what a folder showed before its last switch, to spot editors
+	// saving files they had open from before (stale holds those writes).
+	`
+ALTER TABLE workspace ADD COLUMN prev_task INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace ADD COLUMN prev_files BLOB;
+ALTER TABLE workspace ADD COLUMN next_files BLOB;
+ALTER TABLE workspace ADD COLUMN stale TEXT NOT NULL DEFAULT '[]';
+`,
 }
