@@ -64,6 +64,7 @@ func (p *person) run(args ...string) (string, int) {
 	p.w.t.Helper()
 	os.Setenv("PLY_HOME", filepath.Join(p.w.dir, "home-"+p.name))
 	os.Setenv("PLY_USER", p.name)
+	os.Setenv("PLY_NO_WATCH", "1")
 	var out bytes.Buffer
 	c := &cli.CLI{Out: &out, Err: &out, Dir: p.cwd}
 	code := c.Run(context.Background(), args)
@@ -559,5 +560,55 @@ func TestCopyIgnored(t *testing.T) {
 	a.json(&st, "status")
 	if len(st.Unlabeled) != 0 {
 		t.Fatalf("ignored files show as work: %v", st.Unlabeled)
+	}
+}
+
+func TestNotesAndStatuses(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.person("alice"), w.person("bob")
+	a.seed(map[string]string{"f.txt": lines})
+	a.newTask("Feature")
+	a.write("f.txt", "changed\n")
+	a.ok("label", "change")
+	a.ok("share")
+	a.ok("ready")
+	b.ok("note", "2", "Looks good, but rename the file")
+	a.ok("note", "Will do")
+	var r struct {
+		Task struct {
+			Status string `json:"status"`
+			Notes  []struct {
+				Author string `json:"author"`
+				Body   string `json:"body"`
+			} `json:"notes"`
+		} `json:"task"`
+	}
+	a.json(&r, "review")
+	if r.Task.Status != "ready" || len(r.Task.Notes) != 2 || r.Task.Notes[0].Author != "bob" {
+		t.Fatalf("review: %+v", r.Task)
+	}
+	// Sharing more keeps it ready.
+	a.write("f.txt", "changed again\n")
+	a.ok("label", "more")
+	a.ok("share")
+	a.json(&r, "review")
+	if r.Task.Status != "ready" {
+		t.Fatalf("status after share: %s", r.Task.Status)
+	}
+	b.ok("close", "2")
+	a.write("f.txt", "while closed\n")
+	a.ok("label", "while closed")
+	a.fails("closed", "share")
+	b.ok("reopen", "2")
+	a.ok("share")
+	out := b.ok("tasks")
+	if !strings.Contains(out, "Feature") {
+		t.Fatalf("tasks:\n%s", out)
+	}
+	a.ok("approve")
+	a.fails("already applied", "close")
+	a.ok("remove")
+	if _, err := os.Stat(a.cwd); err == nil {
+		t.Fatal("workspace folder still exists")
 	}
 }

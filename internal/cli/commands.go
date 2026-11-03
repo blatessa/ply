@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,7 +27,11 @@ func (c *CLI) ws() (*local.WS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return e.Workspace()
+	w, err := e.Workspace()
+	if err == nil {
+		local.EnsureWatcher()
+	}
+	return w, err
 }
 
 // taskOrCurrent resolves a task argument, defaulting to the workspace's task.
@@ -87,6 +92,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			local.EnsureWatcher()
 			c.say("Created task #%d %q, built on %s.\nWorkspace: %s", r.Task.ID, r.Task.Title, r.BuiltOn, r.Path)
 			if r.Warning != "" {
 				c.say("Note: %s", r.Warning)
@@ -106,6 +112,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			local.EnsureWatcher()
 			c.say("Task #%d %q (%s), built on %s.\nWorkspace: %s", r.Task.ID, r.Task.Title, r.Task.Status, r.BuiltOn, r.Path)
 			return r, nil
 		},
@@ -616,6 +623,15 @@ func init() {
 				fmt.Fprint(c.Out, Skill)
 			}
 			return map[string]string{"skill": Skill}, nil
+		},
+	})
+	register(&command{
+		name: "watch", usage: "watch", maxPos: 0,
+		summary: "Record saves in every workspace as files change. Commands start this in the background\nautomatically; run it yourself only to see what it's doing. PLY_NO_WATCH=1 turns it off.",
+		run: func(ctx context.Context, c *CLI, a *Args) (any, error) {
+			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return nil, local.Watch(ctx, log.New(c.Err, "ply watch: ", log.LstdFlags))
 		},
 	})
 	register(&command{
